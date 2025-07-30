@@ -15,7 +15,6 @@ public class LSDatagramReceiver {
         boolean isFirstMessage = true;
 
         while (true) {
-
             DatagramPacket packet = new DatagramPacket(buffer, buffer.length);
             socket.receive(packet);
 
@@ -23,40 +22,35 @@ public class LSDatagramReceiver {
             
             if (isFirstMessage) {
                 isFirstMessage = false;
-                continue; // skip processing the very first incoming message
+                continue; // Skip first broadcasted ping
             }
-            
+
             String actualSenderIP = packet.getAddress().getHostAddress();
             String type = extractField(msg, "TYPE");
 
-            if (!"POST".equals(type)) {
+            if (!"POST".equalsIgnoreCase(type)) {
                 String declaredFrom = extractField(msg, "FROM");
                 if (declaredFrom == null || !declaredFrom.contains(actualSenderIP)) {
-                    LSLogger.warn("Spoof detected: FROM field says " + declaredFrom + ", but packet came from " + actualSenderIP);
+                    LSLogger.warn("Spoof detected: FROM field says " + declaredFrom + ", but IP is " + actualSenderIP);
                     continue;
                 }
             }
 
-            LSLogger.recv(type, actualSenderIP, msg); // log full message in verbose mode
-            
-            // === Begin TTL and Token Validation ===
+            LSLogger.recv(type, actualSenderIP, msg);
+
+            // === Token & TTL Validation ===
             String ttlStr = extractField(msg, "TTL");
-            String token = extractField(msg, "TOKEN"); 
-            
-            if ("[MISSING]".equals(ttlStr)) {
-                LSLogger.warn("Dropped message: Missing TTL.");
+            String token = extractField(msg, "TOKEN");
+
+            if ("[MISSING]".equals(ttlStr) || "[MISSING]".equals(token)) {
+                LSLogger.warn("Dropped message: Missing TTL or TOKEN.");
                 continue;
             }
 
-            if ("[MISSING]".equals(token)) {
-                LSLogger.warn("Dropped message: Missing TOKEN.");
-                continue;
-            }
-
-            // Validate TTL
             long now = System.currentTimeMillis() / 1000;
+            long ttl;
             try {
-                long ttl = Long.parseLong(ttlStr);
+                ttl = Long.parseLong(ttlStr);
                 if (now > ttl) {
                     LSLogger.warn("Dropped message: TTL expired.");
                     continue;
@@ -66,15 +60,19 @@ public class LSDatagramReceiver {
                 continue;
             }
 
-            // Validate token
-            LSTokenUtils.TokenInfo info = LSTokenUtils.parseToken(token);
-            if (info == null) {
+            LSTokenUtils.TokenInfo tokenInfo = LSTokenUtils.parseToken(token);
+            if (tokenInfo == null) {
                 LSLogger.warn("Dropped message: Invalid token format.");
                 continue;
             }
 
+            if (now > tokenInfo.expiry) {
+                LSLogger.warn("Dropped message: Token expired.");
+                continue;
+            }
+
             if (TokenRevocationManager.isRevoked(token)) {
-                LSLogger.warn("Dropped message: Token is revoked.");
+                LSLogger.warn("Dropped message: Token has been revoked.");
                 continue;
             }
 
@@ -84,29 +82,54 @@ public class LSDatagramReceiver {
                 type.startsWith("FILE_") ? "file" :
                 type.startsWith("GROUP_") ? "group" :
                 type.startsWith("TICTACTOE_") ? "game" :
-                null; // No expected scope for unknown types
+                null;
 
-            if (expectedScope != null && !info.scope.equals(expectedScope)) {
-                LSLogger.warn("Dropped message: Token scope mismatch (expected " + expectedScope + ").");
+            if (expectedScope != null && !tokenInfo.scope.equals(expectedScope)) {
+                LSLogger.warn("Dropped message: Token scope mismatch. Expected " + expectedScope + " but got " + tokenInfo.scope);
                 continue;
             }
 
-            if (now > info.expiry) {
-                LSLogger.warn("Dropped message: Token expired.");
-                continue;
-            }
+            // === Valid message: Dispatch by TYPE ===
+            switch (type.toUpperCase()) {
+                case "POST":
+                    String postUser = extractField(msg, "USER_ID");
+                    String postContent = extractField(msg, "CONTENT");
+                    System.out.println("\n[POST] " + postUser + ": " + postContent);
+                    break;
 
-            // === End TTL and Token Validation ===
+                case "DM":
+                    String dmFrom = extractField(msg, "FROM");
+                    String dmTo = extractField(msg, "TO");
+                    String dmContent = extractField(msg, "CONTENT");
+                    System.out.println("\n[DM] " + dmFrom + " → " + dmTo + ": " + dmContent);
+                    break;
 
-            if (type.equalsIgnoreCase("POST")) {
-                String userId = extractField(msg, "USER_ID");
-                String content = extractField(msg, "CONTENT");
-                System.out.println("\n [POST] " + userId + ": " + content);
-            } else if (type.equalsIgnoreCase("DM")) {
-                String from = extractField(msg, "FROM");
-                String to = extractField(msg, "TO");
-                String content = extractField(msg, "CONTENT");
-                System.out.println("\n [DM] " + from + ": " + content);
+                case "TICTACTOE_INVITE":
+                    String from = extractField(msg, "FROM");
+                    String to = extractField(msg, "TO");
+                    String gameId = extractField(msg, "GAMEID");
+                    String symbol = extractField(msg, "SYMBOL");
+                    TicTacToeManager.handleInvite(gameId, from, symbol, to);
+                    break;
+
+                case "TICTACTOE_MOVE":
+                    String moveGameId = extractField(msg, "GAMEID");
+                    String moveSymbol = extractField(msg, "SYMBOL");
+                    int pos = Integer.parseInt(extractField(msg, "POSITION"));
+                    int turn = Integer.parseInt(extractField(msg, "TURN"));
+                    TicTacToeManager.handleMove(moveGameId, moveSymbol, pos, turn);
+                    break;
+
+                case "TICTACTOE_RESULT":
+                    String resGameId = extractField(msg, "GAMEID");
+                    String result = extractField(msg, "RESULT");
+                    String winningLine = extractField(msg, "WINNING_LINE");
+                    String winSymbol = extractField(msg, "SYMBOL");
+                    TicTacToeManager.handleResult(resGameId, result, winningLine, winSymbol);
+                    break;
+
+                default:
+                    LSLogger.info("Unhandled TYPE: " + type);
             }
         }
     }
