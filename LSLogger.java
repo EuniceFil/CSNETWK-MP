@@ -4,14 +4,6 @@ import java.util.Date;
 public class LSLogger {
     private static boolean verboseEnabled = false;
 
-    // ANSI color codes (optional)
-    private static final String RESET = "\u001B[0m";
-    private static final String GRAY = "\u001B[90m";
-    private static final String GREEN = "\u001B[32m";
-    private static final String BLUE = "\u001B[34m";
-    private static final String RED = "\u001B[31m";
-    private static final String YELLOW = "\u001B[33m";
-
     // Enable or disable verbose mode
     public static void enableVerbose() {
         verboseEnabled = true;
@@ -36,43 +28,43 @@ public class LSLogger {
     }
 
     public static void warn(String message) {
-        System.out.println(timestamp() + " " + YELLOW + "WARN !" + RESET + " " + message);
+        System.out.println(timestamp() + " " + "WARN !" + " " + message);
     }
 
     public static void error(String message) {
-        System.err.println(timestamp() + " " + RED + "ERROR !" + RESET + " " + message);
+        System.err.println(timestamp() + " " + "ERROR !" + " " + message);
     }
 
     // Scoped logging methods
     public static void send(String messageType, String ip, String fullMessage) {
         if (verboseEnabled) {
-            System.out.println(timestamp() + " " + GREEN + "SEND >" + RESET + " [" + messageType + "] " + ip);
+            System.out.println(timestamp() + " " + "SEND >" + " [" + messageType + "] " + ip);
             System.out.println(indent(fullMessage));
         }
     }
 
     public static void recv(String messageType, String ip, String fullMessage) {
         if (verboseEnabled) {
-            System.out.println(timestamp() + " " + BLUE + "RECV <" + RESET + " [" + messageType + "] " + ip);
+            System.out.println(timestamp() + " " + "RECV <" + " [" + messageType + "] " + ip);
             System.out.println(indent(fullMessage));
         }
     }
 
     public static void drop(String reason, String ip) {
         if (verboseEnabled) {
-            System.out.println(timestamp() + " " + RED + "DROP !" + RESET + " from " + ip + " (" + reason + ")");
+            System.out.println(timestamp() + " " + "DROP !" + " from " + ip + " (" + reason + ")");
         }
     }
 
     public static void token(String status, String details) {
         if (verboseEnabled) {
-            System.out.println(timestamp() + " " + GRAY + "[TOKEN] " + status + RESET + " - " + details);
+            System.out.println(timestamp() + " " + "[TOKEN] " + status + " - " + details);
         }
     }
 
     public static void retry(String action, int attempt) {
         if (verboseEnabled) {
-            System.out.println(timestamp() + " " + YELLOW + "[RETRY]" + RESET + " " + action + " attempt #" + attempt);
+            System.out.println(timestamp() + " " + "[RETRY]" + " " + action + " attempt #" + attempt);
         }
     }
 

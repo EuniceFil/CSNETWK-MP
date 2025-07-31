@@ -1,5 +1,8 @@
 import java.net.InetAddress;
 import java.util.Scanner;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 
 public class LSMain {
 
@@ -25,13 +28,35 @@ public class LSMain {
 
         // Delay then ping
         Thread.sleep(2000);
-        String localIP = LSIPUtils.getLocalIPAddress().getHostAddress();
-        String pingMessage = "TYPE: PING\nFROM: " + localIP + "\n\n";
-        LSDatagramSender.sendBroadcast(pingMessage);
+        //String localIP = LSIPUtils.getLocalIPAddress().getHostAddress();
+        // String pingMessage = "TYPE: PING\nUSER_ID: system@" + localIP + "\n\n";
+        // LSDatagramSender.sendBroadcast(pingMessage);
 
         Scanner scanner = new Scanner(System.in);
         System.out.print("Enter your USER_ID (e.g., dave@192.168.1.10): ");
         String userId = scanner.nextLine();
+
+        String localIP = userId.split("@")[1]; // This gets "127.0.0.1" from your input
+        String pingMessage = "TYPE: PING\nUSER_ID: system@" + localIP + "\n\n";
+        LSDatagramSender.sendBroadcast(pingMessage);
+        
+        System.out.print("Enter your display name: ");
+        String displayName = scanner.nextLine();
+        
+        System.out.print("Enter your status: ");
+        String status = scanner.nextLine();
+
+        // Set up a scheduled task to broadcast the profile periodically
+        ScheduledExecutorService executor = Executors.newSingleThreadScheduledExecutor();
+
+        Runnable broadcastProfileTask = () -> {
+            String profileMessage = LSMessageBuilder.createProfile(userId, displayName, status);
+            LSDatagramSender.sendBroadcast(profileMessage);
+        };
+        
+        // Schedule the task to run immediately, and then every 300 seconds (5 minutes)
+        executor.scheduleAtFixedRate(broadcastProfileTask, 0, 60, TimeUnit.SECONDS);
+        System.out.println("Profile has been broadcast. It will be rebroadcast every 5 minutes.");
 
         while (true) {
             System.out.println("Choose an action: [post] [dm] [raw] [invite] [move] [exit]");
@@ -50,17 +75,17 @@ public class LSMain {
                 LSDatagramSender.sendBroadcast(msg);
             }
 
-            else if (command.equalsIgnoreCase("dm")) {
-                System.out.print("Enter recipient (e.g., bob@192.168.1.20): ");
-                String to = scanner.nextLine();
-                System.out.print("Enter message content: ");
-                String content = scanner.nextLine();
-                System.out.print("Enter recipient IP (e.g., 192.168.1.20): ");
-                InetAddress ip = InetAddress.getByName(scanner.nextLine());
+            // else if (command.equalsIgnoreCase("dm")) {
+            //     System.out.print("Enter recipient (e.g., bob@192.168.1.20): ");
+            //     String to = scanner.nextLine();
+            //     System.out.print("Enter message content: ");
+            //     String content = scanner.nextLine();
+            //     System.out.print("Enter recipient IP (e.g., 192.168.1.20): ");
+            //     InetAddress ip = InetAddress.getByName(scanner.nextLine());
 
-                String msg = LSMessageBuilder.createDM(userId, to, content);
-                LSDatagramSender.sendCustomMessage(msg, ip);
-            }
+            //     String msg = LSMessageBuilder.createDM(userId, to, content);
+            //     LSDatagramSender.sendCustomMessage(msg, ip);
+            // }
 
             else if (command.equalsIgnoreCase("raw")) {
                 System.out.println("Enter raw message. End with empty line:");
@@ -141,5 +166,7 @@ public class LSMain {
                 System.out.println("Unknown command.");
             }
         }
+        scanner.close();
+        listener.interrupt();
     }
 }
