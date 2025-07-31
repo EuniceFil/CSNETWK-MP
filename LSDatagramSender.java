@@ -12,7 +12,8 @@ public class LSDatagramSender {
             socket.setBroadcast(true);
 
             byte[] data = message.getBytes(StandardCharsets.UTF_8);
-            InetAddress broadcastAddress = LSIPUtils.getBroadcastAddress();
+            // InetAddress broadcastAddress = LSIPUtils.getBroadcastAddress();
+            InetAddress broadcastAddress = InetAddress.getByName("255.255.255.255");
 
             DatagramPacket packet = new DatagramPacket(data, data.length, broadcastAddress, PORT);
             socket.send(packet);

@@ -24,6 +24,12 @@ public class LSTokenUtils {
         }
     }
 
+    public static boolean isTokenExpired(TokenInfo tokenInfo) {
+        if (tokenInfo == null) return true;
+        long currentTime = System.currentTimeMillis() / 1000;
+        return currentTime > tokenInfo.expiry;
+    }
+
     public static String generateBroadcastToken(String userId, int ttlSeconds) {
         long currentTimestamp = System.currentTimeMillis() / 1000; // Convert to Unix time (seconds)
         long expiryTimestamp = currentTimestamp + ttlSeconds;
