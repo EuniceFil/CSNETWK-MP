@@ -1,5 +1,3 @@
 Syntax
 
-javac *.java - compile
-
-java LSMain - test main
+python3 profile.py <Name>
