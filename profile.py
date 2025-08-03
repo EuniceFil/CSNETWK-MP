@@ -6,17 +6,142 @@ import sys
 
 # === Configuration ===
 PORT = 50999
-BROADCAST_ADDR = '192.168.68.255'
+BROADCAST_ADDR = '255.255.255.255'  # Change if needed
 USERNAME = sys.argv[1] if len(sys.argv) >= 2 else "Anonymous"
+MY_ID = f"{USERNAME}@{socket.gethostbyname(socket.gethostname())}"
 
 # === State ===
-peers = {}            # username@ip -> (ip, port)
-followers = {}        # who follows me
-following = {}        # who I follow
-posts_list = []       # (timestamp, sender, message)
-received_ids = set()  # to prevent duplicates
+peers = {}           # user_id -> (ip, port)
+followers = set()    # user_id
+known_profiles = {}  # user_id -> (name, bio, timestamp)
 
-# === Sockets ===
+# === Tokens ===
+def generate_token(user_id, ttl=3600, scope="broadcast"):
+    timestamp = int(time.time())
+    return f"{user_id}|{timestamp + ttl}|{scope}"
+
+# === Functions ===
+
+def send_message(data, addr):
+    msg = '\n'.join(f"{k.upper()}: {v}" for k, v in data.items()) + "\n\n"
+    if addr[0].endswith('.255') or addr[0] == '255.255.255.255':
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+    sock.sendto(msg.encode('utf-8'), addr)
+
+def parse_message(raw_msg):
+    data = {}
+    for line in raw_msg.strip().split('\n'):
+        if ': ' in line:
+            key, value = line.split(': ', 1)
+            data[key.lower()] = value
+    return data
+
+def broadcast_hello():
+    msg = {
+        "type": "HELLO",
+        "user_id": MY_ID,
+    }
+    send_message(msg, (BROADCAST_ADDR, PORT))
+
+def broadcast_follow(target_id):
+    message_id = str(uuid.uuid4().hex)
+    token = generate_token(MY_ID, ttl=3600, scope="follow")
+
+    message = (
+        f"TYPE: FOLLOW\n"
+        f"USER_ID: {USERNAME}\n"
+        f"TARGET_ID: {target_id}\n"
+        f"MESSAGE_ID: {message_id}\n"
+        f"TOKEN: {token}\n\n"
+    )
+    sock.sendto(message.encode(), (BROADCAST_ADDR, PORT))
+    print(f"[FOLLOW] You are now following {target_id}.")
+
+def broadcast_profile():
+    profile_msg = {
+        "type": "PROFILE",
+        "user_id": MY_ID,
+        "name": USERNAME,
+        "bio": "Just another peer on LSNP.",
+        "timestamp": str(int(time.time()))
+    }
+    send_message(profile_msg, (BROADCAST_ADDR, PORT))
+
+def broadcast_post(content):
+    message_id = str(uuid.uuid4().hex)
+    ttl = 3600  # Default TTL
+    token = generate_token(USERNAME, ttl=ttl, scope="post")
+    post_msg = {
+        "type": "POST",
+        "user_id": MY_ID,
+        "message_id": message_id,
+        "token": token,
+        "ttl": str(ttl),
+        "content": content
+    }
+    send_message(post_msg, (BROADCAST_ADDR, PORT))
+    print("[POST] Broadcasted message.")
+
+def handle_message(data, addr):
+    mtype = data.get("type", "").upper()
+    
+    if mtype == "HELLO":
+        user = data.get("user_id")
+        if user and user != MY_ID:
+            peers[user] = (addr[0], PORT)
+            print(f"[Discovery] New peer discovered: {user}")
+    
+    elif mtype == "FOLLOW":
+        source_id = data.get("user_id")
+        target_id = data.get("target_id")
+        if target_id == MY_ID and source_id:
+            followers.add(source_id)
+            peers[source_id] = (addr[0], PORT)
+            print(f"[FOLLOW] {source_id} is now following you.")
+            notify = {
+                "type": "FOLLOW_NOTIFY",
+                "user_id": MY_ID,
+                "target_id": source_id
+            }
+            send_message(notify, (addr[0], PORT))
+    
+    elif mtype == "FOLLOW_NOTIFY":
+        user = data.get("user_id")
+        target_id = data.get("target_id")
+        if target_id == MY_ID:
+            print(f"[NOTIFY] {user} acknowledged your follow.")
+
+    elif mtype == "PROFILE":
+        user = data.get("user_id")
+        name = data.get("name", "")
+        bio = data.get("bio", "")
+        timestamp = data.get("timestamp", "")
+        
+        if user and user != MY_ID:
+            known_profiles[user] = (name, bio, timestamp)
+            peers[user] = (addr[0], PORT)
+            print(f"[PROFILE] {user} - {name} | {bio}")
+
+    elif mtype == "POST":
+        user = data.get("user_id")
+        content = data.get("content", "")
+        if user and user != MY_ID:
+            if user in peers:
+                print(f"[POST from {user}]: {content}")
+
+# === Listener Thread ===
+
+def listen():
+    while True:
+        try:
+            raw, addr = sock.recvfrom(65535)
+            message = raw.decode('utf-8')
+            data = parse_message(message)
+            handle_message(data, addr)
+        except Exception as e:
+            print("Error handling message:", e)
+
+# === Start UDP Socket ===
 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 try:
@@ -25,202 +150,55 @@ except AttributeError:
     pass
 sock.bind(('', PORT))
 
-# === Utilities ===
-def create_broadcast_socket():
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    try:
-        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
-    except AttributeError:
-        pass
-    s.bind(('', 0))
-    return s
+# === Start Listener Thread ===
 
-def get_my_ip():
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    try:
-        s.connect(("10.255.255.255", 1))
-        return s.getsockname()[0]
-    except:
-        return "127.0.0.1"
-    finally:
-        s.close()
+threading.Thread(target=listen, daemon=True).start()
 
-MY_IP = get_my_ip()
-MY_ID = f"{USERNAME}@{MY_IP}"
+# === CLI Loop ===
 
-def generate_kv_message(fields: dict) -> str:
-    return ''.join(f"{k.upper()}: {v}\n" for k, v in fields.items()) + "\n"
+print("Welcome to LSNP! Type 'help' to see commands.")
+while True:
+    cmd = input("> ").strip()
+    
+    if cmd == "help":
+        print("Available commands:")
+        print("  hello                     - Send HELLO broadcast")
+        print("  follow <user_id>          - Follow a user")
+        print("  profile                   - Broadcast your profile")
+        print("  post <message>            - Broadcast a post")
+        print("  peers                     - List known peers")
+        print("  followers                 - List your followers")
+        print("  exit                      - Quit")
+    
+    elif cmd == "hello":
+        broadcast_hello()
+    
+    elif cmd.startswith("follow "):
+        _, user = cmd.split(" ", 1)
+        broadcast_follow(user.strip())
+    
+    elif cmd == "profile":
+        broadcast_profile()
+    
+    elif cmd.startswith("post "):
+        _, content = cmd.split(" ", 1)
+        broadcast_post(content.strip())
 
-def parse_kv_message(data: str) -> dict:
-    lines = data.strip().splitlines()
-    result = {}
-    for line in lines:
-        if ": " in line:
-            key, val = line.split(": ", 1)
-            result[key.strip().lower()] = val.strip()
-    return result
+    elif cmd == "peers":
+        if not peers:
+            print("No peers known.")
+        for uid, (ip, port) in peers.items():
+            print(f"{uid} @ {ip}:{port}")
+    
+    elif cmd == "followers":
+        if not followers:
+            print("No followers yet.")
+        for f in followers:
+            print(f)
+    
+    elif cmd == "exit":
+        print("Goodbye!")
+        break
 
-def send_message(fields, addr):
-    msg = generate_kv_message(fields)
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-
-    if addr[0] == BROADCAST_ADDR:
-        s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-
-    s.sendto(msg.encode("utf-8"), addr)
-    s.close()
-
-# === Discovery ===
-def broadcast_hello():
-    msg = {
-        "type": "HELLO",
-        "user_id": MY_ID,
-    }
-    send_message(msg, (BROADCAST_ADDR, PORT))
-
-# === Listener ===
-def handle_message(raw, addr):
-    try:
-        data = parse_kv_message(raw.decode("utf-8"))
-        mtype = data.get("type", "").upper()
-    except:
-        return
-
-    if mtype == "HELLO":
-        user = data.get("user_id")
-        if user and user != MY_ID:
-            peers[user] = (addr[0], PORT)
-            print(f"[Discovery] New peer discovered: {user}")
-
-    elif mtype == "FOLLOW":
-        follower = data.get("user_id")
-        if follower and follower != MY_ID:
-            followers[follower] = addr
-            print(f"[Follow] {follower} is now following you")
-
-            # Respond with FOLLOW_NOTIFY
-            notify_msg = {
-                "type": "FOLLOW_NOTIFY",
-                "user_id": MY_ID
-            }
-            send_message(notify_msg, addr)
-
-    elif mtype == "FOLLOW_NOTIFY":
-        follower = data.get("user_id")
-        if follower and follower != MY_ID:
-            followers[follower] = addr  # Add the follower if not already added
-            print(f"[Follow] {follower} is now following you")
-
-    elif mtype == "POST":
-        sender = data.get("user_id")
-        content = data.get("content")
-        message_id = data.get("message_id")
-
-        if not sender or not content or not message_id:
-            return
-
-        if sender in following:
-            if message_id in received_ids:
-                return
-            received_ids.add(message_id)
-            posts_list.append((time.time(), sender, content))
-            print(f"[New Post] From {sender}: {content}")
-
-def listener():
-    while True:
-        msg, addr = sock.recvfrom(4096)
-        handle_message(msg, addr)
-
-# === Follow ===
-def follow_user(target):
-    if target in peers:
-        ip, _ = peers[target]
-        msg = {
-            "type": "FOLLOW",
-            "user_id": MY_ID
-        }
-        send_message(msg, (ip, PORT))
-        following[target] = (ip, PORT)
-        print(f"You are now following {target}")
     else:
-        print("User not found. Run 'hello' first.")
-
-# === Post ===
-def send_post(content):
-    if not followers:
-        print("[Post] No followers to send to.")
-        return
-
-    message_id = uuid.uuid4().hex[:16]
-    msg = {
-        "type": "POST",
-        "user_id": MY_ID,
-        "content": content,
-        "message_id": message_id
-    }
-
-    for _, addr in followers.items():
-        send_message(msg, addr)
-    print("[Post] Message broadcasted to followers.")
-
-# === Posts ===
-def show_posts():
-    print("\n--- Public Posts (from users you follow) ---")
-    for i, (ts, sender, msg) in enumerate(posts_list, 1):
-        print(f"{i}. From {sender}: {msg}")
-    print("--------------------------------------------")
-
-# === Following List ===
-def show_following():
-    print("\n--- You are following ---")
-    if not following:
-        print("Nobody yet.")
-    else:
-        for user in following:
-            print(f"- {user}")
-    print("--------------------------")
-
-# === Main Loop ===
-def prompt():
-    print(f"\n--- LSNP Peer [{MY_ID}] ---")
-    print("Commands:")
-    print("  hello                     - Discover peers")
-    print("  peers                     - List discovered peers")
-    print("  follow <user@ip>         - Follow a peer")
-    print("  following                - List people you're following")
-    print("  post <message>           - Send a public post")
-    print("  posts                    - Show received posts")
-    print("  exit                     - Quit\n")
-
-    while True:
-        try:
-            cmd = input("> ").strip()
-            if cmd == "":
-                continue
-            elif cmd == "hello":
-                broadcast_hello()
-            elif cmd == "peers":
-                for p in peers:
-                    print("  " + p)
-            elif cmd == "following":
-                show_following()
-            elif cmd.startswith("follow "):
-                follow_user(cmd.split(" ", 1)[1])
-            elif cmd.startswith("post "):
-                send_post(cmd.split(" ", 1)[1])
-            elif cmd == "posts":
-                show_posts()
-            elif cmd == "exit":
-                print("Goodbye.")
-                break
-            else:
-                print("Unknown command.")
-        except KeyboardInterrupt:
-            break
-
-# === Entry Point ===
-if __name__ == "__main__":
-    threading.Thread(target=listener, daemon=True).start()
-    prompt()
+        print("Unknown command. Type 'help' for list.")
