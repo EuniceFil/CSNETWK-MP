@@ -1,3 +1,3 @@
 Syntax
 
-python3 profile.py <Name>
+python3 profile.py Name
