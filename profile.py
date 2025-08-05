@@ -8,8 +8,8 @@ import sys
 PORT = 50999
 BROADCAST_ADDR = '255.255.255.255'
 USERNAME = sys.argv[1] if len(sys.argv) >= 2 else "Anonymous"
-# --- ADDED: Constant for the broadcast interval ---
-PROFILE_BROADCAST_INTERVAL = 300 # 5 mins
+# --- Constant for the broadcast interval ---
+PROFILE_BROADCAST_INTERVAL = 30 # 1 min
 
 try:
     MY_IP = socket.gethostbyname(socket.gethostname())
@@ -20,15 +20,17 @@ MY_ID = f"{USERNAME}@{MY_IP}"
 # === State ===
 peers = {}
 followers = set()
+following = set()
 known_profiles = {}
 # --- MODIFIED: Renamed 'status' to 'bio' for consistency with your commands ---
 my_profile_data = {
     "name": USERNAME,
     "bio": "Just another peer on LSNP."
 }
-# === ADDED: Tic-Tac-Toe State ===
+# === Tic-Tac-Toe State ===
 active_games = {} # Stores game instances by GAMEID
 game_id_counter = 0
+pending_acks = {}
 
 class TicTacToeGame:
     def __init__(self, game_id, opponent_id, my_symbol, opponent_symbol, is_my_turn):
@@ -95,41 +97,70 @@ def parse_message(raw_msg):
     return data
 
 # --- MODIFIED: Rewritten for consistency ---
-def broadcast_follow(target_id):
+def send_follow_request(target_id):
+    if target_id not in peers:
+        print(f"Error: Peer {target_id} not found. Make sure you have seen their profile.")
+        return
+
+    message_id = str(uuid.uuid4().hex)[:8]
     msg = {
         "type": "FOLLOW",
-        "user_id": MY_ID, # Use full ID
-        "target_id": target_id,
-        "message_id": str(uuid.uuid4().hex),
-        "token": generate_token(MY_ID, scope="follow") # Use full ID
+        "message_id": message_id,
+        "from": MY_ID,
+        "to": target_id,
+        "timestamp": str(int(time.time())),
+        "token": generate_token(MY_ID, scope="follow")
     }
-    send_message(msg, (BROADCAST_ADDR, PORT))
-    print(f"[FOLLOW] Sent follow request for {target_id}.")
+    
+    # Store the fact that we're waiting for an ACK for this follow action
+    pending_acks[message_id] = {"type": "FOLLOW", "target": target_id}
+    
+    target_addr = peers[target_id]
+    send_message(msg, target_addr)
+    print(f"[FOLLOW] Sent follow request to {target_id}. Waiting for acknowledgement...")
 
 def broadcast_profile():
     profile_msg = {
         "type": "PROFILE",
         "user_id": MY_ID,
         "name": my_profile_data["name"],
-        "bio": my_profile_data["bio"],
-        "timestamp": str(int(time.time()))
+        "bio": my_profile_data["bio"]
     }
     send_message(profile_msg, (BROADCAST_ADDR, PORT))
 
-# --- MODIFIED: Corrected to use MY_ID for token ---
-def broadcast_post(content):
+def send_post_to_followers(content):
+
+    # Sends a post individually to each known follower.
+
+    if not followers:
+        return print("[POST] You have no followers to post to.")
+
+    print(f"[POST] Sending post to {len(followers)} follower(s)...")
+    
+    # Create the base message once
     post_msg = {
         "type": "POST",
         "user_id": MY_ID,
-        "message_id": str(uuid.uuid4().hex),
-        "token": generate_token(MY_ID, scope="post"), # Use full ID
+        "content": content,
         "ttl": "3600",
-        "content": content
+        "message_id": str(uuid.uuid4().hex), #random
+        "token": generate_token(MY_ID, scope="post")
     }
-    send_message(post_msg, (BROADCAST_ADDR, PORT))
-    print("[POST] Broadcasted message.")
 
-# === ADDED: Tic-Tac-Toe Functions ===
+    # Loop through your followers and send a direct message to each one
+    for follower_id in followers:
+        if follower_id in peers:
+            target_addr = peers[follower_id]
+            # Add the 'to' field for clarity, though not strictly required by handler
+            post_msg['to'] = follower_id 
+            send_message(post_msg, target_addr)
+        else:
+            print(f"[Warning] Follower {follower_id} is not a known, online peer.")
+    
+    print("[POST] Finished sending to followers.")
+
+
+# === Tic-Tac-Toe Functions ===
 def send_invite(target_id, symbol):
     global game_id_counter
     game_id = f"g{game_id_counter}"
@@ -253,35 +284,51 @@ def handle_message(data, addr):
     mtype = data.get("type", "").upper()
 
     if mtype == "FOLLOW":
-        target_id = data.get("target_id")
-        if target_id == MY_ID and sender_id:
-            followers.add(sender_id)
-            peers[sender_id] = (addr[0], PORT)
-            print(f"\n[FOLLOW] {sender_id} is now following you.")
-            notify = { "type": "FOLLOW_NOTIFY", "user_id": MY_ID, "target_id": sender_id }
-            send_message(notify, (addr[0], PORT))
+        from_id = data.get("from")
+        to_id = data.get("to")
+        message_id = data.get("message_id") # Get the ID to ACK it
+        if to_id == MY_ID and from_id and message_id:
+            followers.add(from_id)
+            peers[from_id] = (addr[0], PORT)
+            print(f"\n[FOLLOW] {from_id} is now following you.")
 
-    elif mtype == "FOLLOW_NOTIFY":
-        target_id = data.get("target_id")
-        if target_id == MY_ID:
-            print(f"\n[NOTIFY] {sender_id} acknowledged your follow.")
+            # Send an ACK back to the original sender
+            ack_msg = {
+                "type": "ACK",
+                "message_id": message_id,
+                "status": "RECEIVED"
+            }
+            send_message(ack_msg, addr) # Send back to the sender's address
+
+    elif mtype == "ACK":
+        message_id = data.get("message_id")
+        if message_id in pending_acks:
+            action = pending_acks[message_id]
+            
+            if action["type"] == "FOLLOW":
+                target_id = action["target"]
+                following.add(target_id)
+                print(f"\n[SUCCESS] Your follow request for {target_id} was received. You are now following them.")
+            
+            # Once acknowledged, we can remove it from the pending list
+            del pending_acks[message_id]
 
     elif mtype == "PROFILE":
         name = data.get("name", "")
-        bio = data.get("bio", "") 
-        timestamp = data.get("timestamp", "")
+        bio = data.get("bio", "")
         if sender_id:
-            known_profiles[sender_id] = (name, bio, timestamp)
+            known_profiles[sender_id] = (name, bio)
             peers[sender_id] = (addr[0], PORT)
             print(f"\n[PROFILE] {sender_id}: {name} | {bio}")
 
     elif mtype == "POST":
         content = data.get("content", "")
-        if sender_id in known_profiles:
+        # CORRECT LOGIC: Display the post ONLY if you are following the sender.
+        if sender_id:
             name = known_profiles.get(sender_id, [sender_id])[0]
             print(f"\n[POST from {name}]: {content}")
     
-    # === ADDED: Tic-Tac-Toe Message Handlers ===
+    # === Tic-Tac-Toe Message Handlers ===
     elif mtype == "TICTACTOE_INVITE":
         from_id = data.get("from")
         to_id = data.get("to")
@@ -413,7 +460,7 @@ while True:
     elif cmd.startswith("follow "):
         try:
             _, user = cmd.split(" ", 1)
-            broadcast_follow(user.strip())
+            send_follow_request(user.strip())
         except ValueError:
             print("Usage: follow <user_id>")
 
@@ -440,7 +487,7 @@ while True:
     elif cmd.startswith("post "):
         try:
             _, content = cmd.split(" ", 1)
-            broadcast_post(content.strip())
+            send_post_to_followers(content.strip()) 
         except ValueError:
             print("Usage: post <message>")
 
@@ -451,7 +498,7 @@ while True:
         else:
             print("--- Known Peers ---")
             for uid, (ip, port) in peers.items():
-                name, bio, _ = known_profiles.get(uid, (uid, "N/A", 0))
+                name, bio = known_profiles.get(uid, (uid, "N/A"))
                 print(f"- {name} ({uid}) | Bio: {bio}")
 
     elif cmd == "followers":
@@ -462,7 +509,7 @@ while True:
             for f_id in followers:
                 print(f"- {f_id}")
     
-    # === ADDED: Tic-Tac-Toe Commands ===
+    # === Tic-Tac-Toe Commands ===
     elif cmd.startswith("ttinvite "):
         parts = cmd.split(" ", 2)
         if len(parts) != 3:
