@@ -203,7 +203,6 @@ def send_move(game_id, position):
     target_addr = peers.get(game.opponent_id)
     if target_addr:
         send_message(move_msg, target_addr)
-        print(f"[TICTACTOE] Sent move to {game.opponent_id} for game {game_id}.")
         game.is_my_turn = False
         game.display_board()
 
@@ -290,8 +289,8 @@ def handle_message(data, addr):
         symbol = data.get("symbol")
         
         if to_id == MY_ID:
-            print(f"\n[TICTACTOE] {from_id} is inviting you to play tic-tac-toe (Game {game_id}).")
-            print(f"You will be '{symbol}'. Use 'ttaccept {game_id} <position>' to accept and make your first move.")
+            print(f"\n{from_id.split('@')[0]} is inviting you to play tic-tac-toe.") # e.g. alice is inviting you to play tic-tac-toe.
+            print(f"SYMBOL: '{symbol}'. Use 'ttaccept {game_id} <position>' to accept and make your first move.")
             
             opponent_symbol = 'X' if symbol == 'O' else 'O'
             is_my_turn = (symbol == 'X')
@@ -339,14 +338,11 @@ def handle_message(data, addr):
                 return
             
             if result == "WIN":
-                print(f"\n[TICTACTOE] You won game {game_id}!")
-                print(f"Winning line: {winning_line}")
+                print("\nYou won.")
             elif result == "LOSE":
-                print(f"\n[TICTACTOE] You lost game {game_id}.")
-                print(f"Winning line: {winning_line}")
+                print("\nYou lost.")
             elif result == "DRAW":
-                print(f"\n[TICTACTOE] Game {game_id} is a draw.")
-            
+                print("\nDraw.")
             del active_games[game_id]
 
     # Reprint the prompt cleanly after handling a message
