@@ -26,6 +26,51 @@ my_profile_data = {
     "name": USERNAME,
     "bio": "Just another peer on LSNP."
 }
+# === ADDED: Tic-Tac-Toe State ===
+active_games = {} # Stores game instances by GAMEID
+game_id_counter = 0
+
+class TicTacToeGame:
+    def __init__(self, game_id, opponent_id, my_symbol, opponent_symbol, is_my_turn):
+        self.game_id = game_id
+        self.opponent_id = opponent_id
+        self.my_symbol = my_symbol
+        self.opponent_symbol = opponent_symbol
+        self.board = [' ' for _ in range(9)]
+        self.is_my_turn = is_my_turn
+        self.turn = 1
+    
+    def display_board(self):
+        print(f"\n--- Game {self.game_id} against {self.opponent_id} ---")
+        print(f" {self.board[0]} | {self.board[1]} | {self.board[2]} ")
+        print("---+---+---")
+        print(f" {self.board[3]} | {self.board[4]} | {self.board[5]} ")
+        print("---+---+---")
+        print(f" {self.board[6]} | {self.board[7]} | {self.board[8]} ")
+        print(f"Your symbol: {self.my_symbol}")
+        print(f"Turn: {self.turn}")
+        if self.is_my_turn:
+            print("It's your turn.")
+        else:
+            print(f"Waiting for {self.opponent_id}'s move...")
+
+    def check_winner(self):
+        winning_lines = [(0, 1, 2), (3, 4, 5), (6, 7, 8),
+                         (0, 3, 6), (1, 4, 7), (2, 5, 8),
+                         (0, 4, 8), (2, 4, 6)]
+        for line in winning_lines:
+            if self.board[line[0]] == self.board[line[1]] == self.board[line[2]] != ' ':
+                return self.board[line[0]], line
+        if ' ' not in self.board:
+            return 'DRAW', None
+        return None, None
+
+    def make_move(self, position, symbol):
+        if self.board[position] == ' ':
+            self.board[position] = symbol
+            self.turn += 1
+            return True
+        return False
 
 # === Tokens ===
 def generate_token(user_id, ttl=3600, scope="broadcast"):
@@ -84,9 +129,123 @@ def broadcast_post(content):
     send_message(post_msg, (BROADCAST_ADDR, PORT))
     print("[POST] Broadcasted message.")
 
+# === ADDED: Tic-Tac-Toe Functions ===
+def send_invite(target_id, symbol):
+    global game_id_counter
+    game_id = f"g{game_id_counter}"
+    game_id_counter = (game_id_counter + 1) % 256
+
+    opponent_symbol = 'O' if symbol == 'X' else 'X'
+    is_my_turn = (symbol == 'X')
+    
+    # Create the game instance and store it
+    active_games[game_id] = TicTacToeGame(game_id, target_id, symbol, opponent_symbol, is_my_turn)
+
+    invite_msg = {
+        "type": "TICTACTOE_INVITE",
+        "from": MY_ID,
+        "to": target_id,
+        "gameid": game_id,
+        "message_id": str(uuid.uuid4().hex),
+        "symbol": opponent_symbol,
+        "timestamp": str(int(time.time())),
+        "token": generate_token(MY_ID, scope="game")
+    }
+    target_addr = peers.get(target_id)
+    if target_addr:
+        send_message(invite_msg, target_addr)
+        print(f"[TICTACTOE] Sent invite for game {game_id} to {target_id}. Waiting for their move...")
+        active_games[game_id].display_board()
+    else:
+        print(f"Error: {target_id} is not a known peer.")
+        del active_games[game_id] # Clean up if the peer is unknown
+
+def send_move(game_id, position):
+    game = active_games.get(game_id)
+    if not game:
+        print(f"Error: Game {game_id} not found.")
+        return
+    
+    if not game.is_my_turn:
+        print("Error: It's not your turn.")
+        return
+
+    try:
+        position = int(position)
+        if not (0 <= position <= 8):
+            print("Error: Position must be an integer between 0 and 8.")
+            return
+        
+        if not game.make_move(position, game.my_symbol):
+            print("Error: That position is already taken.")
+            return
+
+    except ValueError:
+        print("Error: Position must be a number.")
+        return
+
+    # Check for a winner or draw
+    winner, winning_line = game.check_winner()
+    
+    # Send the move
+    move_msg = {
+        "type": "TICTACTOE_MOVE",
+        "from": MY_ID,
+        "to": game.opponent_id,
+        "gameid": game_id,
+        "message_id": str(uuid.uuid4().hex),
+        "position": str(position),
+        "symbol": game.my_symbol,
+        "turn": str(game.turn - 1),
+        "token": generate_token(MY_ID, scope="game")
+    }
+    
+    target_addr = peers.get(game.opponent_id)
+    if target_addr:
+        send_message(move_msg, target_addr)
+        print(f"[TICTACTOE] Sent move to {game.opponent_id} for game {game_id}.")
+        game.is_my_turn = False
+        game.display_board()
+
+    # If the game is over, send a result message
+    if winner:
+        send_result(game_id, winner, winning_line)
+        del active_games[game_id] # Game is finished, remove it
+
+def send_result(game_id, result_type, winning_line=None):
+    game = active_games.get(game_id)
+    if not game:
+        return
+    
+    result = "DRAW"
+    if result_type == game.my_symbol:
+        result = "WIN"
+    elif result_type == game.opponent_symbol:
+        result = "LOSE"
+    
+    result_msg = {
+        "type": "TICTACTOE_RESULT",
+        "from": MY_ID,
+        "to": game.opponent_id,
+        "gameid": game_id,
+        "message_id": str(uuid.uuid4().hex),
+        "result": result,
+        "symbol": game.my_symbol,
+        "timestamp": str(int(time.time()))
+    }
+    if winning_line:
+        result_msg["winning_line"] = ",".join(map(str, winning_line))
+
+    target_addr = peers.get(game.opponent_id)
+    if target_addr:
+        send_message(result_msg, target_addr)
+        
+    print(f"\n[TICTACTOE] Game {game_id} finished. Result: {result}.")
+    print(f"> ", end="", flush=True)
+
 # --- "ignore self" logic ---
 def handle_message(data, addr):
-    sender_id = data.get("user_id")
+    sender_id = data.get("user_id") or data.get("from")
 
     # This check is critical to prevent processing your own messages
     if sender_id == MY_ID:
@@ -119,9 +278,76 @@ def handle_message(data, addr):
 
     elif mtype == "POST":
         content = data.get("content", "")
-        if sender_id in peers:
+        if sender_id in known_profiles:
             name = known_profiles.get(sender_id, [sender_id])[0]
             print(f"\n[POST from {name}]: {content}")
+    
+    # === ADDED: Tic-Tac-Toe Message Handlers ===
+    elif mtype == "TICTACTOE_INVITE":
+        from_id = data.get("from")
+        to_id = data.get("to")
+        game_id = data.get("gameid")
+        symbol = data.get("symbol")
+        
+        if to_id == MY_ID:
+            print(f"\n[TICTACTOE] {from_id} is inviting you to play tic-tac-toe (Game {game_id}).")
+            print(f"You will be '{symbol}'. Use 'ttaccept {game_id} <position>' to accept and make your first move.")
+            
+            opponent_symbol = 'X' if symbol == 'O' else 'O'
+            is_my_turn = (symbol == 'X')
+            
+            # Create a game instance for the inviter
+            active_games[game_id] = TicTacToeGame(game_id, from_id, symbol, opponent_symbol, is_my_turn)
+
+    elif mtype == "TICTACTOE_MOVE":
+        from_id = data.get("from")
+        to_id = data.get("to")
+        game_id = data.get("gameid")
+        position = int(data.get("position"))
+        symbol = data.get("symbol")
+        turn = int(data.get("turn"))
+
+        if to_id == MY_ID:
+            game = active_games.get(game_id)
+            if not game:
+                print(f"\n[TICTACTOE] Received move for unknown game {game_id}. Ignoring.")
+                return
+
+            game.make_move(position, symbol)
+            game.is_my_turn = True
+            
+            winner, winning_line = game.check_winner()
+            
+            game.display_board()
+            
+            if winner:
+                # The game is over, we send the result back
+                send_result(game_id, winner, winning_line)
+                del active_games[game_id]
+                
+    elif mtype == "TICTACTOE_RESULT":
+        from_id = data.get("from")
+        to_id = data.get("to")
+        game_id = data.get("gameid")
+        result = data.get("result")
+        winning_line = data.get("winning_line")
+        
+        if to_id == MY_ID:
+            game = active_games.get(game_id)
+            if not game:
+                print(f"\n[TICTACTOE] Received result for unknown game {game_id}. Ignoring.")
+                return
+            
+            if result == "WIN":
+                print(f"\n[TICTACTOE] You won game {game_id}!")
+                print(f"Winning line: {winning_line}")
+            elif result == "LOSE":
+                print(f"\n[TICTACTOE] You lost game {game_id}.")
+                print(f"Winning line: {winning_line}")
+            elif result == "DRAW":
+                print(f"\n[TICTACTOE] Game {game_id} is a draw.")
+            
+            del active_games[game_id]
 
     # Reprint the prompt cleanly after handling a message
     print(f"> ", end="", flush=True)
@@ -136,7 +362,9 @@ def listen():
             data = parse_message(message)
             handle_message(data, addr)
         except Exception as e:
-            print(f"\nError handling message: {e}")
+            # This is a safe way to handle potential errors without crashing the thread
+            sys.stderr.write(f"\nError handling message: {e}\n")
+            sys.stderr.flush()
 
 # --- The periodic broadcaster function ---
 def periodic_broadcaster():
@@ -180,11 +408,18 @@ while True:
         print("  post <message>            - Broadcast a post")
         print("  peers                     - List known peers")
         print("  followers                 - List your followers")
+        print("  ttinvite <user_id> <X|O>  - Invite a user to a tic-tac-toe game")
+        print("  ttmove <gameid> <position>- Make a move in an active game")
+        print("  ttaccept <gameid> <pos>   - Accept an invite and make your first move")
+        print("  ttgames                   - List active games")
         print("  exit                      - Quit")
 
     elif cmd.startswith("follow "):
-        _, user = cmd.split(" ", 1)
-        broadcast_follow(user.strip())
+        try:
+            _, user = cmd.split(" ", 1)
+            broadcast_follow(user.strip())
+        except ValueError:
+            print("Usage: follow <user_id>")
 
     elif cmd.startswith("profile set "):
     # We split by space into exactly 4 parts for a valid command
@@ -207,8 +442,11 @@ while True:
                 print("Invalid field. Can only set 'name' or 'bio'.")
 
     elif cmd.startswith("post "):
-        _, content = cmd.split(" ", 1)
-        broadcast_post(content.strip())
+        try:
+            _, content = cmd.split(" ", 1)
+            broadcast_post(content.strip())
+        except ValueError:
+            print("Usage: post <message>")
 
     # --- MODIFIED: Improved output to show full profile ---
     elif cmd == "peers":
@@ -227,6 +465,57 @@ while True:
             print("--- Your Followers ---")
             for f_id in followers:
                 print(f"- {f_id}")
+    
+    # === ADDED: Tic-Tac-Toe Commands ===
+    elif cmd.startswith("ttinvite "):
+        parts = cmd.split(" ", 2)
+        if len(parts) != 3:
+            print("Usage: ttinvite <user_id> <X|O>")
+        else:
+            target_id = parts[1]
+            symbol = parts[2].upper()
+            if symbol not in ['X', 'O']:
+                print("Error: Symbol must be 'X' or 'O'.")
+            elif target_id not in peers:
+                print(f"Error: {target_id} is not a known peer.")
+            else:
+                send_invite(target_id, symbol)
+                
+    elif cmd.startswith("ttmove "):
+        parts = cmd.split(" ", 2)
+        if len(parts) != 3:
+            print("Usage: ttmove <gameid> <position>")
+        else:
+            game_id = parts[1]
+            position = parts[2]
+            send_move(game_id, position)
+    
+    elif cmd.startswith("ttaccept "):
+        parts = cmd.split(" ", 2)
+        if len(parts) != 3:
+            print("Usage: ttaccept <gameid> <position>")
+        else:
+            game_id = parts[1]
+            position = parts[2]
+            game = active_games.get(game_id)
+            if not game:
+                print(f"Error: No pending invite for game {game_id}.")
+            else:
+                # The first move after accepting is handled by the move function
+                # The invite receiver plays 'O' and the inviter plays 'X'
+                if game.my_symbol == 'X':
+                    print("Error: You are 'X', the inviter. You must wait for their move.")
+                else:
+                    send_move(game_id, position)
+    
+    elif cmd == "ttgames":
+        if not active_games:
+            print("No active games.")
+        else:
+            print("--- Active Games ---")
+            for game_id, game in active_games.items():
+                status = "Your turn" if game.is_my_turn else "Waiting for opponent"
+                print(f"- Game {game_id} against {game.opponent_id} ({game.my_symbol}) - {status}")
 
     elif cmd == "exit":
         print("Goodbye!")
