@@ -96,7 +96,6 @@ def parse_message(raw_msg):
             data[key.lower()] = value
     return data
 
-# --- MODIFIED: Rewritten for consistency ---
 def send_follow_request(target_id):
     if target_id not in peers:
         print(f"Error: Peer {target_id} not found. Make sure you have seen their profile.")
@@ -118,6 +117,37 @@ def send_follow_request(target_id):
     target_addr = peers[target_id]
     send_message(msg, target_addr)
     print(f"[FOLLOW] Sent follow request to {target_id}. Waiting for acknowledgement...")
+
+def send_unfollow_request(target_id):
+    """Sends a request to unfollow a user and waits for acknowledgement."""
+    if target_id not in following:
+        print(f"Error: You are not currently following {target_id}.")
+        return
+
+    message_id = str(uuid.uuid4().hex)[:8]
+    msg = {
+        "type": "UNFOLLOW",
+        "message_id": message_id,
+        "from": MY_ID,
+        "to": target_id,
+        "timestamp": str(int(time.time())),
+        "token": generate_token(MY_ID, scope="follow")
+    }
+
+    # Store the action we are waiting on
+    pending_acks[message_id] = {"type": "UNFOLLOW", "target": target_id}
+    
+    target_addr = peers.get(target_id)
+    if target_addr:
+        send_message(msg, target_addr)
+        print(f"[UNFOLLOW] Sent unfollow request to {target_id}. Waiting for acknowledgement...")
+    else:
+        # If the user is offline, we can't send a message, but we can still unfollow them locally.
+        following.remove(target_id)
+        print(f"[UNFOLLOW] You have unfollowed offline peer {target_id}.")
+        # Clean up the pending ack since it will never arrive
+        if message_id in pending_acks:
+            del pending_acks[message_id]
 
 def broadcast_profile():
     profile_msg = {
@@ -282,35 +312,45 @@ def handle_message(data, addr):
         return
 
     mtype = data.get("type", "").upper()
+    message_id = data.get("message_id")
+
+    if mtype in ["FOLLOW", "UNFOLLOW"] and message_id:
+        # These are critical requests, so we ACK them.
+        ack_msg = {"type": "ACK", "message_id": message_id, "status": "RECEIVED"}
+        send_message(ack_msg, addr)
 
     if mtype == "FOLLOW":
         from_id = data.get("from")
         to_id = data.get("to")
-        message_id = data.get("message_id") # Get the ID to ACK it
         if to_id == MY_ID and from_id and message_id:
             followers.add(from_id)
             peers[from_id] = (addr[0], PORT)
             print(f"\n[FOLLOW] {from_id} is now following you.")
+            ack_msg = {"type": "ACK", "message_id": message_id, "status": "RECEIVED"}
+            send_message(ack_msg, (addr[0], PORT))
 
-            # Send an ACK back to the original sender
-            ack_msg = {
-                "type": "ACK",
-                "message_id": message_id,
-                "status": "RECEIVED"
-            }
-            send_message(ack_msg, addr) # Send back to the sender's address
+    elif mtype == "UNFOLLOW":
+        from_id = data.get("from")
+        to_id = data.get("to")
+        if to_id == MY_ID and from_id in followers and message_id:
+            followers.remove(from_id)
+            print(f"\n[UNFOLLOW] {from_id} has unfollowed you.")
+            ack_msg = {"type": "ACK", "message_id": message_id, "status": "RECEIVED"}
+            send_message(ack_msg, (addr[0], PORT))
 
     elif mtype == "ACK":
-        message_id = data.get("message_id")
         if message_id in pending_acks:
             action = pending_acks[message_id]
+            target_id = action["target"]
             
             if action["type"] == "FOLLOW":
-                target_id = action["target"]
                 following.add(target_id)
-                print(f"\n[SUCCESS] Your follow request for {target_id} was received. You are now following them.")
+                print(f"\n[SUCCESS] You are now following {target_id}.")
             
-            # Once acknowledged, we can remove it from the pending list
+            elif action["type"] == "UNFOLLOW":
+                # The local state was already updated, so we just confirm.
+                print(f"\n[SUCCESS] Your unfollow request for {target_id} was received.")
+            
             del pending_acks[message_id]
 
     elif mtype == "PROFILE":
@@ -448,9 +488,11 @@ while True:
         print("Available commands:")
         print("  profile set <name|bio> <value> - Update your profile name or bio")
         print("  follow <user_id>          - Follow a user")
-        print("  post <message>            - Broadcast a post")
-        print("  peers                     - List known peers")
+        print("  unfollow <user_id>        - Unfollow a user")
+        print("  following                 - List users you are following")
         print("  followers                 - List your followers")
+        print("  post <message>            - Send a post to followers")
+        print("  peers                     - List known peers")
         print("  ttinvite <user_id> <X|O>  - Invite a user to a tic-tac-toe game")
         print("  ttmove <gameid> <position>- Make a move in an active game")
         print("  ttaccept <gameid> <pos>   - Accept an invite and make your first move")
@@ -463,6 +505,21 @@ while True:
             send_follow_request(user.strip())
         except ValueError:
             print("Usage: follow <user_id>")
+            
+    elif cmd.startswith("unfollow "):
+        try:
+            _, user = cmd.split(" ", 1)
+            send_unfollow_request(user.strip())
+        except ValueError:
+            print("Usage: unfollow <user_id>")
+    
+    elif cmd == "following":
+        if not following:
+            print("You are not following anyone.")
+        else:
+            print("--- You Are Following ---")
+            for f_id in following:
+                print(f"- {f_id}")
 
     elif cmd.startswith("profile set "):
     # We split by space into exactly 4 parts for a valid command
