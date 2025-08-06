@@ -22,6 +22,7 @@ peers = {}
 followers = set()
 following = set()
 known_profiles = {}
+posts_list = []
 # --- MODIFIED: Renamed 'status' to 'bio' for consistency with your commands ---
 my_profile_data = {
     "name": USERNAME,
@@ -211,6 +212,7 @@ def send_post_to_followers(content):
         "content": content,
         "ttl": "3600",
         "message_id": str(uuid.uuid4().hex), #random
+        "timestamp": str(int(time.time())),
         "token": generate_token(MY_ID, scope="post")
     }
 
@@ -260,6 +262,40 @@ def send_dm(target_id, content):
     # For now, we'll just send it once and the ACK handler will do its job.
     send_message(msg, target_addr)
     print(f"DM sent to {target_id}.")
+
+def send_like(post_index, action="LIKE"):
+    """Looks up a post by its list index and sends a LIKE or UNLIKE action."""
+    try:
+        post_index = int(post_index)
+        if not (1 <= post_index <= len(posts_list)):
+            raise IndexError
+    except (ValueError, IndexError):
+        return print(f"Error: Invalid post number. Use 'posts' to see the list.")
+
+    # Retrieve the post from our stored list (adjusting for 0-based index)
+    post = posts_list[post_index - 1]
+    
+    target_id = post['sender']
+    post_timestamp = post['ts']
+
+    if target_id not in peers:
+        return print(f"Error: Cannot send like. Peer {target_id} appears to be offline.")
+        
+    msg = {
+        "type": "LIKE",
+        "from": MY_ID,
+        "to": target_id,
+        "post_timestamp": post_timestamp,
+        "action": action, # Will be "LIKE" or "UNLIKE"
+        "timestamp": str(int(time.time())),
+        "token": generate_token(MY_ID, scope="broadcast")
+    }
+    
+    # Likes are sent directly to the post's author
+    send_message(msg, peers[target_id])
+    
+    action_verb = "liked" if action == "LIKE" else "unliked"
+    print(f"[ACTION] You {action_verb} the post: \"{post['content']}\"")
 
 # === Tic-Tac-Toe Functions ===
 def send_invite(target_id, symbol):
@@ -451,14 +487,41 @@ def handle_message(data, addr):
             known_profiles[sender_id] = (name, bio)
             peers[sender_id] = (addr[0], PORT)
             print(f"\n[PROFILE] {sender_id}: {name} | {bio}")
-
+        
     elif mtype == "POST":
         content = data.get("content", "")
+        post_timestamp = data.get("timestamp")
         # CORRECT LOGIC: Display the post ONLY if you are following the sender.
-        if sender_id:
+        if sender_id and content and message_id and post_timestamp:
+            posts_list.append({
+                "id": message_id,
+                "ts": post_timestamp,
+                "sender": sender_id,
+                "content": content
+            })
             name = known_profiles.get(sender_id, [sender_id])[0]
             print(f"\n[POST from {name}]: {content}")
     
+    elif mtype == "LIKE":
+        liker_id = data.get("from")
+        to_id = data.get("to")
+        action = data.get("action", "LIKE").upper()
+        post_timestamp = data.get("post_timestamp")
+        
+        # Validate the message is for me and the token is valid
+        token = data.get("token", "")
+        if to_id == MY_ID and validate_token(token, "broadcast", sender_id):
+            # Find the original post they are talking about
+            original_post_content = "a post of yours"
+            for post in posts_list:
+                if post['ts'] == post_timestamp and post['sender'] == MY_ID:
+                    original_post_content = f"your post: \"{post['content']}\""
+                    break
+            
+            liker_name = known_profiles.get(sender_id, (sender_id,))[0]
+            action_verb = "likes" if action == "LIKE" else "unlikes"
+            print(f"\n[ACTION] {liker_name} {action_verb} {original_post_content}")
+
     # === Tic-Tac-Toe Message Handlers ===
     elif mtype == "TICTACTOE_INVITE":
         from_id = data.get("from")
@@ -543,28 +606,13 @@ def listen():
 # --- The periodic broadcaster function ---
 def periodic_broadcaster():
     """This function runs in a separate thread to send profile updates."""
-    last_profile_time = 0  # Track the last time a PROFILE was sent
-
     while True:
         # Wait for the interval THEN broadcast, so we don't spam on startup
         time.sleep(PROFILE_BROADCAST_INTERVAL)
-
-        now = time.time()
-        if now - last_profile_time >= 300:
-            print("\n[Auto-Profile] Broadcasting profile...")
-            broadcast_profile()
-            last_profile_time = now
-        else:
-            print("\n[Auto-Discovery] Broadcasting PING...")
-            ping_msg = {
-                "type": "PING",
-                "user_id": MY_ID
-            }
-            send_message(ping_msg, (BROADCAST_ADDR, PORT))
-
+        print("\n[Auto-Profile] Broadcasting profile...")
+        broadcast_profile()
         print(f"> ", end="", flush=True)
 # ---------------------------------------------
-
 
 # === Start UDP Socket ===
 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -655,6 +703,23 @@ while True:
             send_post_to_followers(content.strip()) 
         except ValueError:
             print("Usage: post <message>")
+
+    elif cmd == "posts":
+        print("--- Recent Posts ---")
+        if not posts_list:
+            print("No posts to show. Follow someone and wait for them to post.")
+        else:
+            for i, post in enumerate(posts_list, 1):
+                name = known_profiles.get(post['sender'], (post['sender'],))[0]
+                print(f"[{i}] From {name}: {post['content']}")
+                
+    elif cmd.startswith("like "):
+        _, post_num = cmd.split(" ", 1)
+        send_like(post_num, "LIKE")
+        
+    elif cmd.startswith("unlike "):
+        _, post_num = cmd.split(" ", 1)
+        send_like(post_num, "UNLIKE")
 
     elif cmd.startswith("dm "):
         parts = cmd.split(" ", 2)
