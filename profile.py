@@ -30,7 +30,9 @@ my_profile_data = {
 # === Tic-Tac-Toe State ===
 active_games = {} # Stores game instances by GAMEID
 game_id_counter = 0
+dm_history = {}
 pending_acks = {}
+revoked_tokens = set()
 
 class TicTacToeGame:
     def __init__(self, game_id, opponent_id, my_symbol, opponent_symbol, is_my_turn):
@@ -78,6 +80,43 @@ class TicTacToeGame:
 def generate_token(user_id, ttl=3600, scope="broadcast"):
     timestamp = int(time.time())
     return f"{user_id}|{timestamp + ttl}|{scope}"
+
+def validate_token(token, expected_scope, sender_id):
+    """
+    Validates a token based on the LSNP RFC rules.
+    Checks format, scope, expiration, and revocation list.
+    """
+    try:
+        # 1. Check the token's structure: user_id|expiration_timestamp|scope
+        token_user, token_exp, token_scope = token.split('|')
+        
+        # 2. Check if the sender matches the token's owner
+        if token_user != sender_id:
+            print(f"[AUTH-FAIL] Token owner ({token_user}) does not match sender ({sender_id}).")
+            return False
+            
+        # 3. Check if the token has the correct scope for the action
+        if token_scope != expected_scope:
+            print(f"[AUTH-FAIL] Invalid token scope. Expected '{expected_scope}', got '{token_scope}'.")
+            return False
+            
+        # 4. Check for expiration
+        if int(token_exp) < time.time():
+            print(f"[AUTH-FAIL] Expired token from {sender_id}.")
+            return False
+            
+        # 5. Check against the revocation list
+        if token in revoked_tokens:
+            print(f"[AUTH-FAIL] Revoked token received from {sender_id}.")
+            return False
+            
+        # If all checks pass, the token is valid
+        return True
+
+    except (ValueError, IndexError):
+        # Catches errors from a malformed token string (e.g., wrong number of '|')
+        print(f"[AUTH-FAIL] Malformed token received from {sender_id}.")
+        return False
 
 # === Functions ===
 def send_message(data, addr):
@@ -187,6 +226,40 @@ def send_post_to_followers(content):
     
     print("[POST] Finished sending to followers.")
 
+def send_dm(target_id, content):
+    """Constructs and sends a reliable DM to a single user."""
+    if target_id not in peers:
+        return print(f"Error: Peer {target_id} not found.")
+    if not content:
+        return print("Error: Cannot send an empty message.")
+
+    message_id = str(uuid.uuid4().hex)[:16]
+    
+    # Create the message exactly as specified in the RFC
+    msg = {
+        "type": "DM",
+        "from": MY_ID,
+        "to": target_id,
+        "content": content,
+        "timestamp": str(int(time.time())),
+        "message_id": message_id,
+        "token": generate_token(MY_ID, scope="chat")
+    }
+    
+    # Add to our local history immediately
+    if target_id not in dm_history:
+        dm_history[target_id] = []
+    dm_history[target_id].append(('sent', time.time(), content))
+
+    # Set up the ACK waiting mechanism
+    pending_acks[message_id] = {"type": "DM", "target": target_id}
+    target_addr = peers[target_id]
+    
+    # Use the reliable send_message function from the ACK implementation
+    # (Assuming you have a function that handles retransmissions)
+    # For now, we'll just send it once and the ACK handler will do its job.
+    send_message(msg, target_addr)
+    print(f"DM sent to {target_id}.")
 
 # === Tic-Tac-Toe Functions ===
 def send_invite(target_id, symbol):
@@ -353,6 +426,24 @@ def handle_message(data, addr):
             
             del pending_acks[message_id]
 
+    elif mtype == "DM":
+        to_id = data.get("to")
+        token = data.get("token", "")
+        content = data.get("content", "")
+        # 1. Validate the message is for me and the token is correct
+        if to_id == MY_ID and validate_token(token, "chat", sender_id):
+            # 2. Add to local history
+            if sender_id not in dm_history:
+                dm_history[sender_id] = []
+            dm_history[sender_id].append(('recvd', time.time(), content))
+            # 3. Print it for the user
+            name = known_profiles.get(sender_id, (sender_id,))[0]
+            print(f"\n[DM from {name}]: {content}")
+            # 4. Send the ACK
+            if message_id:
+                ack_msg = {"type": "ACK", "message_id": message_id, "status": "RECEIVED"}
+                send_message(ack_msg, addr)
+
     elif mtype == "PROFILE":
         name = data.get("name", "")
         bio = data.get("bio", "")
@@ -486,13 +577,15 @@ while True:
     
     if cmd == "help":
         print("Available commands:")
+        print("  peers                     - List known peers")
         print("  profile set <name|bio> <value> - Update your profile name or bio")
+        print("  post <message>            - Send a post to followers")
         print("  follow <user_id>          - Follow a user")
         print("  unfollow <user_id>        - Unfollow a user")
         print("  following                 - List users you are following")
         print("  followers                 - List your followers")
-        print("  post <message>            - Send a post to followers")
-        print("  peers                     - List known peers")
+        print("  dm <user_id> <message>    - Send a private message")
+        print("  dms [user_id]             - View DM history")
         print("  ttinvite <user_id> <X|O>  - Invite a user to a tic-tac-toe game")
         print("  ttmove <gameid> <position>- Make a move in an active game")
         print("  ttaccept <gameid> <pos>   - Accept an invite and make your first move")
@@ -547,6 +640,30 @@ while True:
             send_post_to_followers(content.strip()) 
         except ValueError:
             print("Usage: post <message>")
+
+    elif cmd.startswith("dm "):
+        parts = cmd.split(" ", 2)
+        if len(parts) == 3:
+            send_dm(parts[1], parts[2])
+        else:
+            print("Usage: dm <user_id> <message>")
+
+    elif cmd.startswith("dms"):
+        parts = cmd.split(" ", 1)
+        target_user = parts[1] if len(parts) > 1 else None
+        
+        if not target_user:
+            print("--- DM Conversations ---")
+            if not dm_history: print("No messages yet.")
+            else: [print(f"- {user}") for user in dm_history]
+        elif target_user in dm_history:
+            name = known_profiles.get(target_user, (target_user,))[0]
+            print(f"--- History with {name} ---")
+            for direction, ts, content in dm_history[target_user]:
+                sender = "You" if direction == 'sent' else name
+                print(f"[{time.ctime(ts)}] {sender}: {content}")
+        else:
+            print(f"No message history with {target_user}.")
 
     # --- MODIFIED: Improved output to show full profile ---
     elif cmd == "peers":
