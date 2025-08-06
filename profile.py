@@ -142,10 +142,8 @@ def send_unfollow_request(target_id):
         send_message(msg, target_addr)
         print(f"[UNFOLLOW] Sent unfollow request to {target_id}. Waiting for acknowledgement...")
     else:
-        # If the user is offline, we can't send a message, but we can still unfollow them locally.
-        following.remove(target_id)
-        print(f"[UNFOLLOW] You have unfollowed offline peer {target_id}.")
-        # Clean up the pending ack since it will never arrive
+        # If peer is offline, the ACK will never arrive, so we can't unfollow.
+        print(f"Error: Peer {target_id} appears to be offline. Cannot send unfollow request.")
         if message_id in pending_acks:
             del pending_acks[message_id]
 
@@ -310,6 +308,8 @@ def handle_message(data, addr):
     # This check is critical to prevent processing your own messages
     if sender_id == MY_ID:
         return
+    
+    packet_sender_addr = addr
 
     mtype = data.get("type", "").upper()
     message_id = data.get("message_id")
@@ -348,7 +348,7 @@ def handle_message(data, addr):
                 print(f"\n[SUCCESS] You are now following {target_id}.")
             
             elif action["type"] == "UNFOLLOW":
-                # The local state was already updated, so we just confirm.
+                following.remove(target_id)
                 print(f"\n[SUCCESS] Your unfollow request for {target_id} was received.")
             
             del pending_acks[message_id]
