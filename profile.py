@@ -543,13 +543,28 @@ def listen():
 # --- The periodic broadcaster function ---
 def periodic_broadcaster():
     """This function runs in a separate thread to send profile updates."""
+    last_profile_time = 0  # Track the last time a PROFILE was sent
+
     while True:
         # Wait for the interval THEN broadcast, so we don't spam on startup
         time.sleep(PROFILE_BROADCAST_INTERVAL)
-        print("\n[Auto-Profile] Broadcasting profile...")
-        broadcast_profile()
+
+        now = time.time()
+        if now - last_profile_time >= 300:
+            print("\n[Auto-Profile] Broadcasting profile...")
+            broadcast_profile()
+            last_profile_time = now
+        else:
+            print("\n[Auto-Discovery] Broadcasting PING...")
+            ping_msg = {
+                "type": "PING",
+                "user_id": MY_ID
+            }
+            send_message(ping_msg, (BROADCAST_ADDR, PORT))
+
         print(f"> ", end="", flush=True)
 # ---------------------------------------------
+
 
 # === Start UDP Socket ===
 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
