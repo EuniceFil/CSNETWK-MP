@@ -44,7 +44,7 @@ class TicTacToeGame:
         self.board = [' ' for _ in range(9)]
         self.is_my_turn = is_my_turn
         self.turn = 1
-    
+
     def display_board(self):
         print(f"\n--- Game {self.game_id} against {self.opponent_id} ---")
         print(f" {self.board[0]} | {self.board[1]} | {self.board[2]} ")
@@ -60,23 +60,25 @@ class TicTacToeGame:
             print(f"Waiting for {self.opponent_id}'s move...")
 
     def check_winner(self):
-        winning_lines = [(0, 1, 2), (3, 4, 5), (6, 7, 8),
-                         (0, 3, 6), (1, 4, 7), (2, 5, 8),
-                         (0, 4, 8), (2, 4, 6)]
-        for line in winning_lines:
-            if self.board[line[0]] == self.board[line[1]] == self.board[line[2]] != ' ':
-                return self.board[line[0]], line
+        lines = [
+            (0,1,2), (3,4,5), (6,7,8),
+            (0,3,6), (1,4,7), (2,5,8),
+            (0,4,8), (2,4,6)
+        ]
+        for a, b, c in lines:
+            if self.board[a] == self.board[b] == self.board[c] != ' ':
+                return self.board[a], (a, b, c)
         if ' ' not in self.board:
-            return 'DRAW', None
+            return "DRAW", None
         return None, None
 
-    def make_move(self, position, symbol):
-        if self.board[position] == ' ':
-            self.board[position] = symbol
+    def make_move(self, pos, symbol):
+        if self.board[pos] == ' ':
+            self.board[pos] = symbol
             self.turn += 1
             return True
         return False
-
+    
 # === Tokens ===
 def generate_token(user_id, ttl=3600, scope="broadcast"):
     timestamp = int(time.time())
@@ -333,29 +335,24 @@ def send_move(game_id, position):
     if not game:
         print(f"Error: Game {game_id} not found.")
         return
-    
+
     if not game.is_my_turn:
         print("Error: It's not your turn.")
         return
 
     try:
         position = int(position)
-        if not (0 <= position <= 8):
-            print("Error: Position must be an integer between 0 and 8.")
+        if position < 0 or position > 8:
+            print("Error: Position must be 0–8.")
             return
-        
         if not game.make_move(position, game.my_symbol):
-            print("Error: That position is already taken.")
+            print("Error: That spot is already taken.")
             return
-
     except ValueError:
         print("Error: Position must be a number.")
         return
 
-    # Check for a winner or draw
-    winner, winning_line = game.check_winner()
-    
-    # Send the move
+    # Send move
     move_msg = {
         "type": "TICTACTOE_MOVE",
         "from": MY_ID,
@@ -367,29 +364,27 @@ def send_move(game_id, position):
         "turn": str(game.turn - 1),
         "token": generate_token(MY_ID, scope="game")
     }
-    
-    target_addr = peers.get(game.opponent_id)
-    if target_addr:
-        send_message(move_msg, target_addr)
-        game.is_my_turn = False
-        game.display_board()
+    send_message(move_msg, peers[game.opponent_id])
+    game.is_my_turn = False
+    game.display_board()
 
-    # If the game is over, send a result message
+    # Check for winner
+    winner, winning_line = game.check_winner()
     if winner:
         send_result(game_id, winner, winning_line)
-        del active_games[game_id] # Game is finished, remove it
+        del active_games[game_id]
 
 def send_result(game_id, result_type, winning_line=None):
     game = active_games.get(game_id)
     if not game:
         return
-    
+
     result = "DRAW"
     if result_type == game.my_symbol:
         result = "WIN"
     elif result_type == game.opponent_symbol:
         result = "LOSE"
-    
+
     result_msg = {
         "type": "TICTACTOE_RESULT",
         "from": MY_ID,
@@ -403,12 +398,9 @@ def send_result(game_id, result_type, winning_line=None):
     if winning_line:
         result_msg["winning_line"] = ",".join(map(str, winning_line))
 
-    target_addr = peers.get(game.opponent_id)
-    if target_addr:
-        send_message(result_msg, target_addr)
-        
+    send_message(result_msg, peers[game.opponent_id])
     print(f"\n[TICTACTOE] Game {game_id} finished. Result: {result}.")
-    print(f"> ", end="", flush=True)
+    print("> ", end="", flush=True)
 
 # --- "ignore self" logic ---
 def handle_message(data, addr):
@@ -540,54 +532,38 @@ def handle_message(data, addr):
             active_games[game_id] = TicTacToeGame(game_id, from_id, symbol, opponent_symbol, is_my_turn)
 
     elif mtype == "TICTACTOE_MOVE":
-        from_id = data.get("from")
-        to_id = data.get("to")
         game_id = data.get("gameid")
         position = int(data.get("position"))
         symbol = data.get("symbol")
-        turn = int(data.get("turn"))
+        
+        game = active_games.get(game_id)
+        if not game:
+            print(f"\n[TICTACTOE] Received move for unknown game {game_id}. Ignoring.")
+            return
 
-        if to_id == MY_ID:
-            game = active_games.get(game_id)
-            if not game:
-                print(f"\n[TICTACTOE] Received move for unknown game {game_id}. Ignoring.")
-                return
-
-            game.make_move(position, symbol)
-            game.is_my_turn = True
+        game.make_move(position, symbol)
+        game.is_my_turn = True
+        game.display_board()
+        
+        winner, winning_line = game.check_winner()
+        if winner:
+            send_result(game_id, winner, winning_line)
+            del active_games[game_id]
             
-            winner, winning_line = game.check_winner()
-            
-            game.display_board()
-            
-            if winner:
-                # The game is over, we send the result back
-                send_result(game_id, winner, winning_line)
-                del active_games[game_id]
-                
     elif mtype == "TICTACTOE_RESULT":
-        from_id = data.get("from")
-        to_id = data.get("to")
         game_id = data.get("gameid")
         result = data.get("result")
-        winning_line = data.get("winning_line")
+        game = active_games.get(game_id)
+        if not game:
+            return
         
-        if to_id == MY_ID:
-            game = active_games.get(game_id)
-            if not game:
-                print(f"\n[TICTACTOE] Received result for unknown game {game_id}. Ignoring.")
-                return
-            
-            if result == "WIN":
-                print("\nYou won.")
-            elif result == "LOSE":
-                print("\nYou lost.")
-            elif result == "DRAW":
-                print("\nDraw.")
+        if result == "WIN":
+            print("\nYou won.")
+        elif result == "LOSE":
+            print("\nYou lost.")
+        else:
+            print("\nDraw.")
             del active_games[game_id]
-
-    # Reprint the prompt cleanly after handling a message
-    print(f"> ", end="", flush=True)
 
 # === Listener Thread ===
 def listen():
