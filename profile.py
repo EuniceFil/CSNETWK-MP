@@ -7,9 +7,16 @@ import sys
 # === Configuration ===
 PORT = 50999
 BROADCAST_ADDR = '255.255.255.255'
-USERNAME = sys.argv[1] if len(sys.argv) >= 2 else "Anonymous"
 # --- Constant for the broadcast interval ---
 PROFILE_BROADCAST_INTERVAL = 30 # 1 min
+
+# --- ADDED: Check for --verbose flag ---
+VERBOSE = "--verbose" in sys.argv
+# We need to filter it out so it doesn't become the username
+if VERBOSE:
+    sys.argv.remove("--verbose")
+# ------------------------------------
+USERNAME = sys.argv[1] if len(sys.argv) >= 2 else "Anonymous"
 
 try:
     MY_IP = socket.gethostbyname(socket.gethostname())
@@ -23,12 +30,10 @@ followers = set()
 following = set()
 known_profiles = {}
 posts_list = []
-# --- MODIFIED: Renamed 'status' to 'bio' for consistency with your commands ---
 my_profile_data = {
     "name": USERNAME,
     "bio": "Just another peer on LSNP."
 }
-# === Tic-Tac-Toe State ===
 active_games = {} # Stores game instances by GAMEID
 game_id_counter = 0
 dm_history = {}
@@ -78,52 +83,50 @@ class TicTacToeGame:
             self.turn += 1
             return True
         return False
-    
+
 # === Tokens ===
 def generate_token(user_id, ttl=3600, scope="broadcast"):
     timestamp = int(time.time())
     return f"{user_id}|{timestamp + ttl}|{scope}"
 
 def validate_token(token, expected_scope, sender_id):
-    """
-    Validates a token based on the LSNP RFC rules.
-    Checks format, scope, expiration, and revocation list.
-    """
+    """Validates a token with detailed verbose logging."""
     try:
-        # 1. Check the token's structure: user_id|expiration_timestamp|scope
         token_user, token_exp, token_scope = token.split('|')
         
-        # 2. Check if the sender matches the token's owner
         if token_user != sender_id:
-            print(f"[AUTH-FAIL] Token owner ({token_user}) does not match sender ({sender_id}).")
+            log("TOKEN !", f"FAIL: Owner ({token_user}) != Sender ({sender_id})")
             return False
             
-        # 3. Check if the token has the correct scope for the action
         if token_scope != expected_scope:
-            print(f"[AUTH-FAIL] Invalid token scope. Expected '{expected_scope}', got '{token_scope}'.")
+            log("TOKEN !", f"FAIL: Scope mismatch. Expected '{expected_scope}', got '{token_scope}'")
             return False
             
-        # 4. Check for expiration
         if int(token_exp) < time.time():
-            print(f"[AUTH-FAIL] Expired token from {sender_id}.")
+            log("TOKEN !", f"FAIL: Expired token from {sender_id}")
             return False
             
-        # 5. Check against the revocation list
         if token in revoked_tokens:
-            print(f"[AUTH-FAIL] Revoked token received from {sender_id}.")
+            log("TOKEN !", f"FAIL: Token is on revocation list")
             return False
-            
-        # If all checks pass, the token is valid
+        
+        log("TOKEN OK", f"SUCCESS: Valid '{token_scope}' token from {sender_id}")
         return True
 
     except (ValueError, IndexError):
-        # Catches errors from a malformed token string (e.g., wrong number of '|')
-        print(f"[AUTH-FAIL] Malformed token received from {sender_id}.")
+        log("TOKEN !", f"FAIL: Malformed token from {sender_id}")
         return False
 
 # === Functions ===
+def log(prefix, message):
+    """Prints a message only if VERBOSE mode is enabled."""
+    if VERBOSE:
+        timestamp = time.strftime("%H:%M:%S", time.localtime())
+        print(f"[{timestamp}] {prefix} {message}")
+        
 def send_message(data, addr):
     msg = '\n'.join(f"{k.upper()}: {v}" for k, v in data.items()) + "\n\n"
+    log(f"SEND > [{data.get('type', 'UNKNOWN')}] to {addr[0]}:{addr[1]}", f"\n------\n{msg.strip()}\n------")
     # Using a 'with' statement is safer for sockets in threads
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
         if addr[0].endswith('.255') or addr[0] == '255.255.255.255':
@@ -565,6 +568,9 @@ def handle_message(data, addr):
             print("\nDraw.")
             del active_games[game_id]
 
+    # Reprint the prompt cleanly after handling a message
+    print(f"> ", end="", flush=True)
+
 # === Listener Thread ===
 def listen():
     while True:
@@ -573,8 +579,10 @@ def listen():
             raw, addr = sock.recvfrom(65535)
             message = raw.decode('utf-8')
             data = parse_message(message)
+            log(f"RECV < [{data.get('type', 'UNKNOWN')}] from {addr[0]}:{addr[1]}", f"\n------\n{message.strip()}\n------")
             handle_message(data, addr)
         except Exception as e:
+            log("DROP !", f"Packet dropped due to error: {e}")
             # This is a safe way to handle potential errors without crashing the thread
             sys.stderr.write(f"\nError handling message: {e}\n")
             sys.stderr.flush()
