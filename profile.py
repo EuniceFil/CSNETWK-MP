@@ -320,7 +320,7 @@ def send_invite(target_id, symbol):
         "to": target_id,
         "gameid": game_id,
         "message_id": str(uuid.uuid4().hex),
-        "symbol": opponent_symbol,
+        "symbol": symbol,
         "timestamp": str(int(time.time())),
         "token": generate_token(MY_ID, scope="game")
     }
