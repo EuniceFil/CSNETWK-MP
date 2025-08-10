@@ -7,9 +7,16 @@ import sys
 # === Configuration ===
 PORT = 50999
 BROADCAST_ADDR = '255.255.255.255'
-USERNAME = sys.argv[1] if len(sys.argv) >= 2 else "Anonymous"
 # --- Constant for the broadcast interval ---
 PROFILE_BROADCAST_INTERVAL = 30 # 1 min
+
+# --- ADDED: Check for --verbose flag ---
+VERBOSE = "--verbose" in sys.argv
+# We need to filter it out so it doesn't become the username
+if VERBOSE:
+    sys.argv.remove("--verbose")
+# ------------------------------------
+USERNAME = sys.argv[1] if len(sys.argv) >= 2 else "Anonymous"
 
 try:
     MY_IP = socket.gethostbyname(socket.gethostname())
@@ -23,12 +30,10 @@ followers = set()
 following = set()
 known_profiles = {}
 posts_list = []
-# --- MODIFIED: Renamed 'status' to 'bio' for consistency with your commands ---
 my_profile_data = {
     "name": USERNAME,
     "bio": "Just another peer on LSNP."
 }
-# === Tic-Tac-Toe State ===
 active_games = {} # Stores game instances by GAMEID
 game_id_counter = 0
 dm_history = {}
@@ -78,52 +83,50 @@ class TicTacToeGame:
             self.turn += 1
             return True
         return False
-    
+
 # === Tokens ===
 def generate_token(user_id, ttl=3600, scope="broadcast"):
     timestamp = int(time.time())
     return f"{user_id}|{timestamp + ttl}|{scope}"
 
 def validate_token(token, expected_scope, sender_id):
-    """
-    Validates a token based on the LSNP RFC rules.
-    Checks format, scope, expiration, and revocation list.
-    """
+    """Validates a token with detailed verbose logging."""
     try:
-        # 1. Check the token's structure: user_id|expiration_timestamp|scope
         token_user, token_exp, token_scope = token.split('|')
         
-        # 2. Check if the sender matches the token's owner
         if token_user != sender_id:
-            print(f"[AUTH-FAIL] Token owner ({token_user}) does not match sender ({sender_id}).")
+            log("TOKEN !", f"FAIL: Owner ({token_user}) != Sender ({sender_id})")
             return False
             
-        # 3. Check if the token has the correct scope for the action
         if token_scope != expected_scope:
-            print(f"[AUTH-FAIL] Invalid token scope. Expected '{expected_scope}', got '{token_scope}'.")
+            log("TOKEN !", f"FAIL: Scope mismatch. Expected '{expected_scope}', got '{token_scope}'")
             return False
             
-        # 4. Check for expiration
         if int(token_exp) < time.time():
-            print(f"[AUTH-FAIL] Expired token from {sender_id}.")
+            log("TOKEN !", f"FAIL: Expired token from {sender_id}")
             return False
             
-        # 5. Check against the revocation list
         if token in revoked_tokens:
-            print(f"[AUTH-FAIL] Revoked token received from {sender_id}.")
+            log("TOKEN !", f"FAIL: Token is on revocation list")
             return False
-            
-        # If all checks pass, the token is valid
+        
+        log("TOKEN OK", f"SUCCESS: Valid '{token_scope}' token from {sender_id}")
         return True
 
     except (ValueError, IndexError):
-        # Catches errors from a malformed token string (e.g., wrong number of '|')
-        print(f"[AUTH-FAIL] Malformed token received from {sender_id}.")
+        log("TOKEN !", f"FAIL: Malformed token from {sender_id}")
         return False
 
 # === Functions ===
+def log(prefix, message):
+    """Prints a message only if VERBOSE mode is enabled."""
+    if VERBOSE:
+        timestamp = time.strftime("%H:%M:%S", time.localtime())
+        print(f"[{timestamp}] {prefix} {message}")
+        
 def send_message(data, addr):
     msg = '\n'.join(f"{k.upper()}: {v}" for k, v in data.items()) + "\n\n"
+    log(f"SEND > [{data.get('type', 'UNKNOWN')}] to {addr[0]}:{addr[1]}", f"\n------\n{msg.strip()}\n------")
     # Using a 'with' statement is safer for sockets in threads
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
         if addr[0].endswith('.255') or addr[0] == '255.255.255.255':
@@ -335,24 +338,22 @@ def send_move(game_id, position):
     if not game:
         print(f"Error: Game {game_id} not found.")
         return
-
     if not game.is_my_turn:
         print("Error: It's not your turn.")
         return
 
     try:
         position = int(position)
-        if position < 0 or position > 8:
-            print("Error: Position must be 0–8.")
-            return
-        if not game.make_move(position, game.my_symbol):
-            print("Error: That spot is already taken.")
-            return
     except ValueError:
         print("Error: Position must be a number.")
         return
+    if position < 0 or position > 8:
+        print("Error: Position must be 0–8.")
+        return
+    if not game.make_move(position, game.my_symbol):
+        print("Error: That spot is already taken.")
+        return
 
-    # Send move
     move_msg = {
         "type": "TICTACTOE_MOVE",
         "from": MY_ID,
@@ -366,9 +367,8 @@ def send_move(game_id, position):
     }
     send_message(move_msg, peers[game.opponent_id])
     game.is_my_turn = False
-    game.display_board()
+    game.display_board()  # Non-verbose board print
 
-    # Check for winner
     winner, winning_line = game.check_winner()
     if winner:
         send_result(game_id, winner, winning_line)
@@ -399,6 +399,8 @@ def send_result(game_id, result_type, winning_line=None):
         result_msg["winning_line"] = ",".join(map(str, winning_line))
 
     send_message(result_msg, peers[game.opponent_id])
+    # Non-verbose board print after sending result
+    game.display_board()
     print(f"\n[TICTACTOE] Game {game_id} finished. Result: {result}.")
     print("> ", end="", flush=True)
 
@@ -516,54 +518,99 @@ def handle_message(data, addr):
 
     # === Tic-Tac-Toe Message Handlers ===
     elif mtype == "TICTACTOE_INVITE":
+        game_id = data.get("gameid")
+        symbol = data.get("symbol", "").upper()
         from_id = data.get("from")
         to_id = data.get("to")
-        game_id = data.get("gameid")
-        symbol = data.get("symbol")
         
-        if to_id == MY_ID:
-            print(f"\n{from_id.split('@')[0]} is inviting you to play tic-tac-toe.") # e.g. alice is inviting you to play tic-tac-toe.
-            print(f"SYMBOL: '{symbol}'. Use 'ttaccept {game_id} <position>' to accept and make your first move.")
-            
-            opponent_symbol = 'X' if symbol == 'O' else 'O'
-            is_my_turn = (symbol == 'X')
-            
-            # Create a game instance for the inviter
-            active_games[game_id] = TicTacToeGame(game_id, from_id, symbol, opponent_symbol, is_my_turn)
-
+        # Validation
+        if not game_id or not game_id.startswith("g") or not game_id[1:].isdigit() or not (0 <= int(game_id[1:]) <= 255):
+            print(f"\n[TICTACTOE] Invalid GAMEID '{game_id}'. Ignoring invite.")
+            return
+        if symbol not in ("X", "O"):
+            print(f"\n[TICTACTOE] Invalid SYMBOL '{symbol}'. Ignoring invite.")
+            return
+        if to_id != MY_ID:
+            return  # Not for us
+        
+        # Non-verbose printing
+        inviter_name = from_id.split("@")[0]
+        print(f"\n{inviter_name} is inviting you to play tic-tac-toe.")
+        
+        # Create game object: we are invitee, so opponent moves first if symbol != our symbol
+        my_symbol = "O" if symbol == "X" else "X"
+        active_games[game_id] = TicTacToeGame(
+            game_id=game_id,
+            opponent_id=from_id,
+            my_symbol=my_symbol,
+            opponent_symbol=symbol,
+            is_my_turn=(my_symbol == "X")
+        )
+        
     elif mtype == "TICTACTOE_MOVE":
         game_id = data.get("gameid")
-        position = int(data.get("position"))
-        symbol = data.get("symbol")
+        position = data.get("position")
+        symbol = data.get("symbol", "").upper()
         
+        # Validation
+        try:
+            position = int(position)
+        except (TypeError, ValueError):
+            print(f"\n[TICTACTOE] Invalid POSITION '{position}'. Ignoring move.")
+            return
+        
+        if position < 0 or position > 8:
+            print(f"\n[TICTACTOE] POSITION out of range: {position}")
+            return
+        if symbol not in ("X", "O"):
+            print(f"\n[TICTACTOE] Invalid SYMBOL '{symbol}'. Ignoring move.")
+            return
+
         game = active_games.get(game_id)
         if not game:
             print(f"\n[TICTACTOE] Received move for unknown game {game_id}. Ignoring.")
             return
+        if symbol != game.opponent_symbol:
+            print(f"\n[TICTACTOE] SYMBOL mismatch in move for game {game_id}. Ignoring.")
+            return
+        if not game.make_move(position, symbol):
+            print(f"\n[TICTACTOE] Position {position} already taken in game {game_id}.")
+            return
 
-        game.make_move(position, symbol)
         game.is_my_turn = True
-        game.display_board()
-        
+        game.display_board()  # Non-verbose: just print board
+
         winner, winning_line = game.check_winner()
         if winner:
             send_result(game_id, winner, winning_line)
             del active_games[game_id]
-            
+        
     elif mtype == "TICTACTOE_RESULT":
         game_id = data.get("gameid")
-        result = data.get("result")
+        result = data.get("result", "").upper()
+        winning_line = data.get("winning_line")
+
         game = active_games.get(game_id)
         if not game:
             return
-        
+
+        # Non-verbose printing: only board + whose turn (but since it's final, we print result)
+        game.display_board()
         if result == "WIN":
             print("\nYou won.")
         elif result == "LOSE":
             print("\nYou lost.")
-        else:
+        elif result == "DRAW":
             print("\nDraw.")
-            del active_games[game_id]
+        elif result == "FORFEIT":
+            print("\nOpponent forfeited.")
+        else:
+            print(f"\nGame over. Result: {result}")
+
+        del active_games[game_id]
+
+    # Reprint the prompt cleanly after handling a message
+    print(f"> ", end="", flush=True)
 
 # === Listener Thread ===
 def listen():
@@ -573,8 +620,10 @@ def listen():
             raw, addr = sock.recvfrom(65535)
             message = raw.decode('utf-8')
             data = parse_message(message)
+            log(f"RECV < [{data.get('type', 'UNKNOWN')}] from {addr[0]}:{addr[1]}", f"\n------\n{message.strip()}\n------")
             handle_message(data, addr)
         except Exception as e:
+            log("DROP !", f"Packet dropped due to error: {e}")
             # This is a safe way to handle potential errors without crashing the thread
             sys.stderr.write(f"\nError handling message: {e}\n")
             sys.stderr.flush()
@@ -616,20 +665,26 @@ while True:
     
     if cmd == "help":
         print("Available commands:")
-        print("  peers                     - List known peers")
-        print("  profile set <name|bio> <value> - Update your profile name or bio")
-        print("  post <message>            - Send a post to followers")
-        print("  follow <user_id>          - Follow a user")
-        print("  unfollow <user_id>        - Unfollow a user")
-        print("  following                 - List users you are following")
-        print("  followers                 - List your followers")
-        print("  dm <user_id> <message>    - Send a private message")
-        print("  dms [user_id]             - View DM history")
-        print("  ttinvite <user_id> <X|O>  - Invite a user to a tic-tac-toe game")
-        print("  ttmove <gameid> <position>- Make a move in an active game")
-        print("  ttaccept <gameid> <pos>   - Accept an invite and make your first move")
-        print("  ttgames                   - List active games")
-        print("  exit                      - Quit")
+        print("  peers                                - List known peers")
+        print("  profile set <name|bio> <value>       - Update your profile name or bio")
+        print("  post <message>                       - Send a post to followers")
+        print("  posts                                - List of posts of the users you are following")
+        print("  like <post number>                   - Like a post")  
+        print("  unlike <post number>                 - Unlike a post")  
+        print("  follow <user_id>                     - Follow a user")
+        print("  unfollow <user_id>                   - Unfollow a user")
+        print("  following                            - List users you are following")
+        print("  followers                            - List your followers")
+        print("  dm <user_id> <message>               - Send a private message")
+        print("  dms [user_id]                        - View DM history")
+        print("  group create <id> <name> <members>   - Create a group (members are comma-separated IDs)")
+        print("  gsend <group_id> <message>           - Send a message to a group")
+        print("  groups                               - List the groups you are in")
+        print("  ttinvite <user_id> <X|O>             - Invite a user to a tic-tac-toe game")
+        print("  ttmove <gameid> <position>           - Make a move in an active game")
+        print("  ttaccept <gameid> <pos>              - Accept an invite and make your first move")
+        print("  ttgames                              - List active games")
+        print("  exit                                 - Quit")
 
     elif cmd.startswith("follow "):
         try:
