@@ -10,7 +10,7 @@ BROADCAST_ADDR = '255.255.255.255'
 # --- Constant for the broadcast interval ---
 PROFILE_BROADCAST_INTERVAL = 30 # 1 min
 
-# --- ADDED: Check for --verbose flag ---
+# --- Check for --verbose flag ---
 VERBOSE = "--verbose" in sys.argv
 # We need to filter it out so it doesn't become the username
 if VERBOSE:
@@ -39,6 +39,7 @@ game_id_counter = 0
 dm_history = {}
 pending_acks = {}
 revoked_tokens = set()
+my_groups = {}
 
 class TicTacToeGame:
     def __init__(self, game_id, opponent_id, my_symbol, opponent_symbol, is_my_turn):
@@ -302,6 +303,71 @@ def send_like(post_index, action="LIKE"):
     action_verb = "liked" if action == "LIKE" else "unliked"
     print(f"[ACTION] You {action_verb} the post: \"{post['content']}\"")
 
+def create_group(group_id, group_name, members_str):
+    """Creates a group and sends the invite to all members."""
+    if not group_id or not group_name:
+        return print("Error: Group ID and name cannot be empty.")
+    if group_id in my_groups:
+        return print(f"Error: You are already in a group with ID '{group_id}'.")
+
+    member_ids = {m.strip() for m in members_str.split(',') if m.strip()}
+    # The creator is always a member
+    member_ids.add(MY_ID)
+    
+    # Check if all intended members are known peers
+    for member_id in member_ids:
+        if member_id != MY_ID and member_id not in peers:
+            print(f"[Warning] Peer {member_id} is not currently known. They might not receive the group creation message.")
+
+    # Create the message
+    msg = {
+        "type": "GROUP_CREATE",
+        "from": MY_ID,
+        "group_id": group_id,
+        "group_name": group_name,
+        "members": ",".join(sorted(list(member_ids))),
+        "timestamp": str(int(time.time())),
+        "token": generate_token(MY_ID, scope="group")
+    }
+    
+    # Send the message to every member (including yourself, to create the group locally)
+    for member_id in member_ids:
+        if member_id == MY_ID:
+            # Handle locally instead of sending to self over network
+            handle_message(msg, (MY_IP, PORT))
+        elif member_id in peers:
+            send_message(msg, peers[member_id])
+        
+    print(f"Group '{group_name}' creation messages sent.")
+
+
+def send_group_message(group_id, content):
+    """Sends a message to all members of a specific group."""
+    if group_id not in my_groups:
+        return print(f"Error: You are not a member of group '{group_id}'.")
+    if not content:
+        return print("Error: Cannot send an empty message.")
+        
+    group_info = my_groups[group_id]
+    members = group_info["members"]
+
+    msg = {
+        "type": "GROUP_MESSAGE",
+        "from": MY_ID,
+        "group_id": group_id,
+        "content": content,
+        "timestamp": str(int(time.time())),
+        "token": generate_token(MY_ID, scope="group")
+    }
+    
+    print(f"Sending message to {len(members)} members of '{group_info['name']}'...")
+    for member_id in members:
+        if member_id != MY_ID and member_id in peers:
+            send_message(msg, peers[member_id])
+    
+    # Also display your own message
+    print(f"[GROUP {group_info['name']}] You: {content}")
+
 # === Tic-Tac-Toe Functions ===
 def send_invite(target_id, symbol):
     global game_id_counter
@@ -408,14 +474,14 @@ def send_result(game_id, result_type, winning_line=None):
 def handle_message(data, addr):
     sender_id = data.get("user_id") or data.get("from")
 
-    # This check is critical to prevent processing your own messages
-    if sender_id == MY_ID:
+    # Critical check to prevent processing your own broadcast messages, but allow targeted self-messages (like group create)
+    if sender_id == MY_ID and data.get('to') != MY_ID and data.get('type') != 'GROUP_CREATE':
         return
-    
-    packet_sender_addr = addr
+
 
     mtype = data.get("type", "").upper()
     message_id = data.get("message_id")
+    token = data.get("token", "")
 
     if mtype in ["FOLLOW", "UNFOLLOW"] and message_id:
         # These are critical requests, so we ACK them.
@@ -515,6 +581,31 @@ def handle_message(data, addr):
             liker_name = known_profiles.get(sender_id, (sender_id,))[0]
             action_verb = "likes" if action == "LIKE" else "unlikes"
             print(f"\n[ACTION] {liker_name} {action_verb} {original_post_content}")
+
+    elif mtype == "GROUP_CREATE":
+        group_id = data.get("group_id")
+        group_name = data.get("group_name")
+        members_str = data.get("members", "")
+        
+        if validate_token(token, "group", sender_id) and group_id and group_name:
+            # Add or update the group in our local state
+            member_set = set(members_str.split(','))
+            my_groups[group_id] = {"name": group_name, "members": member_set}
+            
+            # Print non-verbose message only if we are not the creator
+            if sender_id != MY_ID:
+                print(f"\nYou’ve been added to {group_name}")
+
+    elif mtype == "GROUP_MESSAGE":
+        group_id = data.get("group_id")
+        content = data.get("content", "")
+        
+        if validate_token(token, "group", sender_id) and group_id in my_groups:
+            # Security check: ensure the sender is actually in the group according to our local state
+            if sender_id in my_groups[group_id]["members"]:
+                print(f'\n{sender_id} sent “{content}”')
+            else:
+                log("DROP !", f"Group message from {sender_id} for group {group_id}, but they are not a member.")
 
     # === Tic-Tac-Toe Message Handlers ===
     elif mtype == "TICTACTOE_INVITE":
@@ -776,7 +867,33 @@ while True:
         else:
             print(f"No message history with {target_user}.")
 
-    # --- MODIFIED: Improved output to show full profile ---
+    elif cmd.startswith("group create "):
+        parts = cmd.split(" ", 4)
+        if len(parts) < 5:
+            print("Usage: group create <group_id> <group_name> <member1,member2,...>")
+        else:
+            group_id = parts[2]
+            group_name = parts[3]
+            members_str = parts[4]
+            create_group(group_id, group_name, members_str)
+    
+    elif cmd.startswith("gsend "):
+        parts = cmd.split(" ", 2)
+        if len(parts) != 3:
+            print("Usage: gsend <group_id> <message>")
+        else:
+            group_id = parts[1]
+            content = parts[2]
+            send_group_message(group_id, content)
+
+    elif cmd == "groups":
+        if not my_groups:
+            print("You are not a member of any groups.")
+        else:
+            print("--- Your Groups ---")
+            for group_id, info in my_groups.items():
+                print(f"- {info['name']} (ID: {group_id}) | Members: {len(info['members'])}")
+
     elif cmd == "peers":
         if not peers:
             print("No peers known.")
