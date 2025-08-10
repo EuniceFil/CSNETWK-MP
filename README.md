@@ -8,9 +8,10 @@ Verbose mode
 
 python profile.py Name --verbose
 
-For the game
+For the game:
 peers
 ttinvite Bob@127.0.0.1 X
 ttmove g0 POSITION
 
+(sa peers dapat kita sila both)
 (yung position if from 0-8)
