@@ -478,7 +478,6 @@ def handle_message(data, addr):
     if sender_id == MY_ID and data.get('to') != MY_ID and data.get('type') != 'GROUP_CREATE':
         return
 
-
     mtype = data.get("type", "").upper()
     message_id = data.get("message_id")
     token = data.get("token", "")
@@ -613,13 +612,18 @@ def handle_message(data, addr):
         symbol = data.get("symbol", "").upper()
         from_id = data.get("from")
         to_id = data.get("to")
+
+        # Verbose log for incoming invite
+        log("RECV <", f"TICTACTOE_INVITE from {from_id} for game {game_id}. My symbol will be '{'O' if symbol == 'X' else 'X'}'.")
         
         # Validation
         if not game_id or not game_id.startswith("g") or not game_id[1:].isdigit() or not (0 <= int(game_id[1:]) <= 255):
             print(f"\n[TICTACTOE] Invalid GAMEID '{game_id}'. Ignoring invite.")
+            log("DROP !", f"Invalid GAMEID '{game_id}' in TICTACTOE_INVITE.")
             return
         if symbol not in ("X", "O"):
             print(f"\n[TICTACTOE] Invalid SYMBOL '{symbol}'. Ignoring invite.")
+            log("DROP !", f"Invalid SYMBOL '{symbol}' in TICTACTOE_INVITE.")
             return
         if to_id != MY_ID:
             return  # Not for us
@@ -642,30 +646,47 @@ def handle_message(data, addr):
         game_id = data.get("gameid")
         position = data.get("position")
         symbol = data.get("symbol", "").upper()
-        
+        from_id = data.get("from")
+
+        # Verbose log for incoming move
+        log("RECV <", f"TICTACTOE_MOVE from {from_id} for game {game_id}. Position: {position}, Symbol: {symbol}.")
+
         # Validation
         try:
             position = int(position)
         except (TypeError, ValueError):
             print(f"\n[TICTACTOE] Invalid POSITION '{position}'. Ignoring move.")
+            log("DROP !", f"Invalid POSITION '{position}' in TICTACTOE_MOVE.")
             return
         
         if position < 0 or position > 8:
             print(f"\n[TICTACTOE] POSITION out of range: {position}")
+            log("DROP !", f"POSITION out of range: {position} in TICTACTOE_MOVE.")
             return
         if symbol not in ("X", "O"):
             print(f"\n[TICTACTOE] Invalid SYMBOL '{symbol}'. Ignoring move.")
+            log("DROP !", f"Invalid SYMBOL '{symbol}' in TICTACTOE_MOVE.")
             return
 
         game = active_games.get(game_id)
         if not game:
             print(f"\n[TICTACTOE] Received move for unknown game {game_id}. Ignoring.")
+            log("DROP !", f"Received move for unknown game {game_id}.")
             return
         if symbol != game.opponent_symbol:
             print(f"\n[TICTACTOE] SYMBOL mismatch in move for game {game_id}. Ignoring.")
+            log("DROP !", f"SYMBOL mismatch in TICTACTOE_MOVE for game {game_id}. Expected {game.opponent_symbol}, got {symbol}.")
             return
         if not game.make_move(position, symbol):
             print(f"\n[TICTACTOE] Position {position} already taken in game {game_id}.")
+            log("DROP !", f"Position {position} already taken in game {game_id}.")
+            return
+
+        # Token validation for moves
+        token = data.get("token", "")
+        if not validate_token(token, "game", from_id):
+            print(f"\n[TICTACTOE] Invalid token for move in game {game_id}. Ignoring.")
+            log("DROP !", f"Invalid token for TICTACTOE_MOVE from {from_id}.")
             return
 
         game.is_my_turn = True
@@ -681,8 +702,12 @@ def handle_message(data, addr):
         result = data.get("result", "").upper()
         winning_line = data.get("winning_line")
 
+        # Verbose log for incoming result
+        log("RECV <", f"TICTACTOE_RESULT for game {game_id}. Result: {result}.")
+
         game = active_games.get(game_id)
         if not game:
+            log("DROP !", f"Received result for unknown game {game_id}.")
             return
 
         # Non-verbose printing: only board + whose turn (but since it's final, we print result)
@@ -842,132 +867,118 @@ while True:
     elif cmd.startswith("unlike "):
         _, post_num = cmd.split(" ", 1)
         send_like(post_num, "UNLIKE")
-
+    
     elif cmd.startswith("dm "):
-        parts = cmd.split(" ", 2)
-        if len(parts) == 3:
-            send_dm(parts[1], parts[2])
-        else:
+        try:
+            _, target_id, content = cmd.split(" ", 2)
+            send_dm(target_id, content)
+        except ValueError:
             print("Usage: dm <user_id> <message>")
 
     elif cmd.startswith("dms"):
         parts = cmd.split(" ", 1)
-        target_user = parts[1] if len(parts) > 1 else None
-        
-        if not target_user:
-            print("--- DM Conversations ---")
-            if not dm_history: print("No messages yet.")
-            else: [print(f"- {user}") for user in dm_history]
-        elif target_user in dm_history:
-            name = known_profiles.get(target_user, (target_user,))[0]
-            print(f"--- History with {name} ---")
-            for direction, ts, content in dm_history[target_user]:
-                sender = "You" if direction == 'sent' else name
-                print(f"[{time.ctime(ts)}] {sender}: {content}")
+        if len(parts) == 1:
+            # List all DM conversations
+            if not dm_history:
+                print("No DM history.")
+            else:
+                print("--- DM Conversations ---")
+                for user_id in dm_history:
+                    name = known_profiles.get(user_id, (user_id,))[0]
+                    last_msg_type, _, last_msg_content = dm_history[user_id][-1]
+                    sent_or_recvd = "Sent" if last_msg_type == "sent" else "Received"
+                    print(f"- {name} ({user_id}): {sent_or_recvd} last message: \"{last_msg_content}\"")
         else:
-            print(f"No message history with {target_user}.")
+            # View history for a specific user
+            target_id = parts[1]
+            if target_id in dm_history:
+                print(f"--- DM History with {target_id} ---")
+                for msg_type, timestamp, content in dm_history[target_id]:
+                    prefix = "You" if msg_type == "sent" else target_id
+                    msg_time = time.strftime("%H:%M:%S", time.localtime(timestamp))
+                    print(f"[{msg_time}] {prefix}: {content}")
+            else:
+                print(f"No DM history with {target_id}.")
 
     elif cmd.startswith("group create "):
-        parts = cmd.split(" ", 4)
-        if len(parts) < 5:
-            print("Usage: group create <group_id> <group_name> <member1,member2,...>")
-        else:
-            group_id = parts[2]
-            group_name = parts[3]
-            members_str = parts[4]
+        try:
+            _, _, group_id, group_name, members_str = cmd.split(" ", 4)
             create_group(group_id, group_name, members_str)
-    
+        except ValueError:
+            print("Usage: group create <id> <name> <members (comma-separated)>")
+            
     elif cmd.startswith("gsend "):
-        parts = cmd.split(" ", 2)
-        if len(parts) != 3:
-            print("Usage: gsend <group_id> <message>")
-        else:
-            group_id = parts[1]
-            content = parts[2]
+        try:
+            _, group_id, content = cmd.split(" ", 2)
             send_group_message(group_id, content)
+        except ValueError:
+            print("Usage: gsend <group_id> <message>")
 
     elif cmd == "groups":
         if not my_groups:
             print("You are not a member of any groups.")
         else:
-            print("--- Your Groups ---")
+            print("--- My Groups ---")
             for group_id, info in my_groups.items():
-                print(f"- {info['name']} (ID: {group_id}) | Members: {len(info['members'])}")
+                print(f"- '{info['name']}' (ID: {group_id}, Members: {len(info['members'])})")
 
-    elif cmd == "peers":
-        if not peers:
-            print("No peers known.")
-        else:
-            print("--- Known Peers ---")
-            for uid, (ip, port) in peers.items():
-                name, bio = known_profiles.get(uid, (uid, "N/A"))
-                print(f"- {name} ({uid}) | Bio: {bio}")
-
-    elif cmd == "followers":
-        if not followers:
-            print("You have no followers yet.")
-        else:
-            print("--- Your Followers ---")
-            for f_id in followers:
-                print(f"- {f_id}")
-    
-    # === Tic-Tac-Toe Commands ===
     elif cmd.startswith("ttinvite "):
-        parts = cmd.split(" ", 2)
-        if len(parts) != 3:
-            print("Usage: ttinvite <user_id> <X|O>")
-        else:
-            target_id = parts[1]
-            symbol = parts[2].upper()
-            if symbol not in ['X', 'O']:
+        try:
+            _, target_id, symbol = cmd.split(" ", 2)
+            if symbol.upper() not in ("X", "O"):
                 print("Error: Symbol must be 'X' or 'O'.")
-            elif target_id not in peers:
-                print(f"Error: {target_id} is not a known peer.")
             else:
-                send_invite(target_id, symbol)
-                
+                send_invite(target_id, symbol.upper())
+        except ValueError:
+            print("Usage: ttinvite <user_id> <X|O>")
+
     elif cmd.startswith("ttmove "):
-        parts = cmd.split(" ", 2)
-        if len(parts) != 3:
-            print("Usage: ttmove <gameid> <position>")
-        else:
-            game_id = parts[1]
-            position = parts[2]
+        try:
+            _, game_id, position = cmd.split(" ", 2)
             send_move(game_id, position)
-    
-    elif cmd.startswith("ttaccept "):
-        parts = cmd.split(" ", 2)
-        if len(parts) != 3:
-            print("Usage: ttaccept <gameid> <position>")
-        else:
-            game_id = parts[1]
-            position = parts[2]
-            game = active_games.get(game_id)
-            if not game:
-                print(f"Error: No pending invite for game {game_id}.")
-            else:
-                # The first move after accepting is handled by the move function
-                # The invite receiver plays 'O' and the inviter plays 'X'
-                if game.my_symbol == 'X':
-                    print("Error: You are 'X', the inviter. You must wait for their move.")
-                else:
-                    send_move(game_id, position)
-    
+        except ValueError:
+            print("Usage: ttmove <gameid> <position 0-8>")
+
     elif cmd == "ttgames":
         if not active_games:
-            print("No active games.")
+            print("No active tic-tac-toe games.")
         else:
-            print("--- Active Games ---")
+            print("--- Active Tic-Tac-Toe Games ---")
             for game_id, game in active_games.items():
-                status = "Your turn" if game.is_my_turn else "Waiting for opponent"
-                print(f"- Game {game_id} against {game.opponent_id} ({game.my_symbol}) - {status}")
-
+                turn_status = "Your turn" if game.is_my_turn else f"Waiting for {game.opponent_id}"
+                print(f"[{game_id}] vs {game.opponent_id} | Your symbol: {game.my_symbol} | {turn_status}")
+    
+    elif cmd.startswith("ttaccept "):
+        try:
+            _, game_id, position = cmd.split(" ", 2)
+            game = active_games.get(game_id)
+            if not game:
+                print(f"Error: Game {game_id} not found or not invited to.")
+                continue
+            if game.is_my_turn:
+                # This command is for accepting an invite where it's our first move.
+                # If it's already our turn, they've already moved.
+                print("Error: It is already your turn to move. Use 'ttmove'.")
+                continue
+            
+            # The 'ttaccept' command is essentially a 'ttmove' for the first move after an invite.
+            send_move(game_id, position)
+        except ValueError:
+            print("Usage: ttaccept <gameid> <position 0-8>")
+    
     elif cmd == "exit":
         print("Goodbye!")
         break
     
-    elif cmd == "":
-        continue
-
+    elif cmd == "peers":
+        print("--- Known Peers ---")
+        if not peers:
+            print("No peers discovered yet.")
+        else:
+            for peer_id, addr in peers.items():
+                # Get the name and bio if available
+                name, bio = known_profiles.get(peer_id, (peer_id.split('@')[0], "No bio available"))
+                print(f"- {name} ({peer_id}): {addr[0]}:{addr[1]}")
+                print(f"  Bio: {bio}")
     else:
-        print("Unknown command. Type 'help' for list.")
+        print(f"Unknown command: '{cmd}'. Type 'help' for a list of commands.")
