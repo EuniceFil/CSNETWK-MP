@@ -3,6 +3,9 @@ import threading
 import time
 import uuid
 import sys
+import os
+import base64
+import mimetypes
 
 # === Configuration ===
 PORT = 50999
@@ -40,6 +43,17 @@ dm_history = {}
 pending_acks = {}
 revoked_tokens = set()
 my_groups = {}
+
+# === File transfer state ===
+# Offers received but not yet accepted: fileid -> metadata
+pending_file_offers = {}
+# Accepted offers we are expecting chunks for: fileid -> {'filename', 'filesize', 'filetype', 'total_chunks', 'chunks': {idx: data}, 'from'}
+incoming_transfers = {}
+# Outgoing transfer records for bookkeeping if needed: fileid -> metadata
+outgoing_transfers = {}
+
+# Max chunk size in bytes (raw bytes before base64). Choose a value that keeps UDP packets reasonably sized.
+MAX_CHUNK_SIZE = 4096
 
 class TicTacToeGame:
     def __init__(self, game_id, opponent_id, my_symbol, opponent_symbol, is_my_turn):
@@ -368,6 +382,186 @@ def send_group_message(group_id, content):
     # Also display your own message
     print(f"[GROUP {group_info['name']}] You: {content}")
 
+# === File transfer helpers ===
+def make_fileid():
+    return uuid.uuid4().hex[:8]
+
+def chunk_bytes(data, size):
+    for i in range(0, len(data), size):
+        yield data[i:i+size]
+
+def send_file_offer(target_id, filepath, description=""):
+    """Read file metadata and send FILE_OFFER to target peer."""
+    if target_id not in peers:
+        print(f"Error: Peer {target_id} not known.")
+        return
+    if not os.path.isfile(filepath):
+        print(f"Error: File '{filepath}' not found.")
+        return
+
+    filename = os.path.basename(filepath)
+    filesize = os.path.getsize(filepath)
+    filetype, _ = mimetypes.guess_type(filepath)
+    if not filetype:
+        filetype = "application/octet-stream"
+    fileid = make_fileid()
+    timestamp = str(int(time.time()))
+    token = generate_token(MY_ID, scope="file")
+
+    msg = {
+        "type": "FILE_OFFER",
+        "from": MY_ID,
+        "to": target_id,
+        "filename": filename,
+        "filesize": str(filesize),
+        "filetype": filetype,
+        "fileid": fileid,
+        "description": description,
+        "timestamp": timestamp,
+        "token": token
+    }
+
+    # Record outgoing transfer (file path needed when sending chunks)
+    outgoing_transfers[fileid] = {
+        "filepath": filepath,
+        "filename": filename,
+        "filesize": filesize,
+        "filetype": filetype,
+        "target": target_id,
+        "token": token,
+        "sent": False
+    }
+
+    send_message(msg, peers[target_id])
+    print(f"[FILE_OFFER] Sent offer for '{filename}' to {target_id}. FileID: {fileid}")
+    print("Waiting for recipient to accept (use 'fileaccept <fileid>' on recipient).")
+
+def _send_file_chunks_async(fileid):
+    """Sends chunks for an outgoing transfer. Runs in a separate thread."""
+    record = outgoing_transfers.get(fileid)
+    if not record:
+        return
+    target = record["target"]
+    target_addr = peers.get(target)
+    if not target_addr:
+        log("DROP !", f"Cannot send chunks for {fileid}: peer {target} unknown.")
+        return
+
+    filepath = record["filepath"]
+    try:
+        with open(filepath, "rb") as f:
+            raw = f.read()
+    except Exception as e:
+        log("DROP !", f"Failed to read file {filepath}: {e}")
+        return
+
+    # Break into chunks
+    chunk_list = list(chunk_bytes(raw, MAX_CHUNK_SIZE))
+    total_chunks = len(chunk_list)
+    chunk_size = MAX_CHUNK_SIZE
+    token = record["token"]
+    fileid_local = fileid
+
+    for idx, chunk in enumerate(chunk_list):
+        b64chunk = base64.b64encode(chunk).decode('ascii')
+        chunk_msg = {
+            "type": "FILE_CHUNK",
+            "from": MY_ID,
+            "to": target,
+            "fileid": fileid_local,
+            "chunk_index": str(idx),
+            "total_chunks": str(total_chunks),
+            "chunk_size": str(len(chunk)),
+            "token": token,
+            "data": b64chunk
+        }
+        send_message(chunk_msg, target_addr)
+        # Slight pause to avoid flooding the network
+        time.sleep(0.02)
+
+    # After sending all chunks, optionally wait for FILE_RECEIVED from receiver.
+    record["sent"] = True
+    log("SEND >", f"All chunks for {fileid_local} sent to {target} ({total_chunks} chunks).")
+
+def fileaccept_cmd(fileid):
+    """Called in CLI on recipient to accept an offer and start receiving."""
+    offer = pending_file_offers.get(fileid)
+    if not offer:
+        print(f"Error: No pending file offer with id {fileid}. Use 'fileoffers' to list offers.")
+        return
+    # Mark that we accept this file — create incoming_transfers entry
+    incoming_transfers[fileid] = {
+        "filename": offer["filename"],
+        "filesize": int(offer["filesize"]),
+        "filetype": offer["filetype"],
+        "from": offer["from"],
+        "total_chunks": None,  # to be set when the first chunk arrives
+        "chunks": {}
+    }
+    # Remove from pending offers
+    del pending_file_offers[fileid]
+    print(f"[FILE] Accepted offer {fileid}. Waiting for chunks...")
+
+def send_file_received(target_id, fileid, status="COMPLETE"):
+    msg = {
+        "type": "FILE_RECEIVED",
+        "from": MY_ID,
+        "to": target_id,
+        "fileid": fileid,
+        "status": status,
+        "timestamp": str(int(time.time()))
+    }
+    if target_id in peers:
+        send_message(msg, peers[target_id])
+
+def try_assemble_file(fileid):
+    """If all chunks for fileid are present, assemble, write to disk and notify sender."""
+    info = incoming_transfers.get(fileid)
+    if not info:
+        return
+    chunks = info["chunks"]
+    total = info["total_chunks"]
+    if total is None:
+        return
+    if len(chunks) < total:
+        return
+
+    # Reassemble chunks in order
+    ordered = []
+    for i in range(total):
+        ordered.append(chunks[str(i)])
+    try:
+        raw_b64 = "".join(ordered)
+        raw = base64.b64decode(raw_b64)
+    except Exception as e:
+        log("DROP !", f"Failed to decode/reassemble file {fileid}: {e}")
+        return
+
+    filename = info["filename"]
+    # If filename exists, do not overwrite — create unique name
+    outname = filename
+    base, ext = os.path.splitext(filename)
+    counter = 1
+    while os.path.exists(outname):
+        outname = f"{base}_{counter}{ext}"
+        counter += 1
+
+    try:
+        with open(outname, "wb") as f:
+            f.write(raw)
+    except Exception as e:
+        log("DROP !", f"Failed to write file {outname}: {e}")
+        return
+
+    # Inform user per spec (only print when all chunks completed)
+    print(f"\nFile transfer of {filename} is complete. Saved as: {outname}")
+
+    # Send FILE_RECEIVED back to sender
+    send_file_received(info["from"], fileid, status="COMPLETE")
+
+    # Cleanup
+    del incoming_transfers[fileid]
+
 # === Tic-Tac-Toe Functions ===
 def send_invite(target_id, symbol):
     global game_id_counter
@@ -606,6 +800,91 @@ def handle_message(data, addr):
             else:
                 log("DROP !", f"Group message from {sender_id} for group {group_id}, but they are not a member.")
 
+    # === File transfer handlers ===
+    elif mtype == "FILE_OFFER":
+        # Received an offer; store it in pending_file_offers and prompt user per spec
+        from_id = data.get("from")
+        to_id = data.get("to")
+        fileid = data.get("fileid")
+        filename = data.get("filename")
+        filesize = data.get("filesize")
+        filetype = data.get("filetype")
+        description = data.get("description", "")
+
+        # Ensure offer is intended for us
+        if to_id != MY_ID:
+            return
+
+        # Validate token scope before advertising offer to user (optional but sensible)
+        if not validate_token(token, "file", from_id):
+            log("DROP !", f"FILE_OFFER from {from_id} failed token validation.")
+            return
+
+        pending_file_offers[fileid] = {
+            "from": from_id,
+            "filename": filename,
+            "filesize": filesize,
+            "filetype": filetype,
+            "description": description,
+            "timestamp": data.get("timestamp", "")
+        }
+
+        # Non-verbose printing (per spec)
+        sender_name = known_profiles.get(from_id, (from_id.split('@')[0],))[0]
+        print(f"\nUser {sender_name} is sending you a file do you accept? (fileid: {fileid})")
+
+    elif mtype == "FILE_CHUNK":
+        # Received chunk — store it only if offer accepted (incoming_transfers contains fileid)
+        from_id = data.get("from")
+        to_id = data.get("to")
+        fileid = data.get("fileid")
+        chunk_index = data.get("chunk_index")
+        total_chunks = data.get("total_chunks")
+        chunk_size = data.get("chunk_size")
+        b64data = data.get("data")
+        token = data.get("token", "")
+
+        # Only accept chunks if they are for us
+        if to_id != MY_ID:
+            return
+
+        # Token validation (must be file scope)
+        if not validate_token(token, "file", from_id):
+            log("DROP !", f"FILE_CHUNK from {from_id} failed token validation.")
+            return
+
+        # If this fileid is not in incoming_transfers (i.e., not accepted), ignore chunks
+        transfer = incoming_transfers.get(fileid)
+        if not transfer:
+            log("DROP !", f"Ignoring chunk for {fileid} because offer not accepted or unknown.")
+            return
+
+        # Initialize total_chunks if not set
+        if transfer["total_chunks"] is None and total_chunks:
+            try:
+                transfer["total_chunks"] = int(total_chunks)
+            except ValueError:
+                transfer["total_chunks"] = None
+
+        # Store the chunk (keep as base64 string for easier concatenation/assembly)
+        transfer["chunks"][chunk_index] = b64data
+        log("RECV <", f"Stored chunk {chunk_index} for {fileid} (from {from_id})")
+
+        # Check if we can assemble
+        try_assemble_file(fileid)
+
+    elif mtype == "FILE_RECEIVED":
+        # Sender receives notification; we can log it
+        from_id = data.get("from")
+        to_id = data.get("to")
+        fileid = data.get("fileid")
+        status = data.get("status", "")
+        if to_id == MY_ID:
+            log("RECV <", f"FILE_RECEIVED from {from_id} for {fileid}: {status}")
+            # Optionally cleanup outgoing_transfers
+            if fileid in outgoing_transfers:
+                del outgoing_transfers[fileid]
+
     # === Tic-Tac-Toe Message Handlers ===
     elif mtype == "TICTACTOE_INVITE":
         game_id = data.get("gameid")
@@ -793,6 +1072,9 @@ while True:
         print("  followers                            - List your followers")
         print("  dm <user_id> <message>               - Send a private message")
         print("  dms [user_id]                        - View DM history")
+        print("  fileoffer <user_id> <filepath> [desc]- Offer a file to a peer")
+        print("  fileaccept <fileid>                  - Accept a pending file offer")
+        print("  fileoffers                           - List pending file offers")
         print("  group create <id> <name> <members>   - Create a group (members are comma-separated IDs)")
         print("  gsend <group_id> <message>           - Send a message to a group")
         print("  groups                               - List the groups you are in")
@@ -965,7 +1247,41 @@ while True:
             send_move(game_id, position)
         except ValueError:
             print("Usage: ttaccept <gameid> <position 0-8>")
-    
+
+    elif cmd.startswith("fileoffer "):
+        # Usage: fileoffer <user_id> <filepath> [description]
+        parts = cmd.split(" ", 2)
+        if len(parts) < 3:
+            print("Usage: fileoffer <user_id> <filepath> [description]")
+        else:
+            # parts[2] may contain filepath and optional description - try to split sensibly
+            rest = parts[2].strip()
+            # if description provided, we expect: "<filepath> <description...>"
+            subparts = rest.split(" ", 1)
+            filepath = subparts[0]
+            desc = subparts[1] if len(subparts) == 2 else ""
+            send_file_offer(parts[1], filepath, desc)
+
+    elif cmd.startswith("fileaccept "):
+        try:
+            _, fileid = cmd.split(" ", 1)
+            fileid = fileid.strip()
+            fileaccept_cmd(fileid)
+        except ValueError:
+            print("Usage: fileaccept <fileid>")
+
+    elif cmd == "fileoffers":
+        if not pending_file_offers:
+            print("No pending file offers.")
+        else:
+            print("--- Pending File Offers ---")
+            for fid, meta in pending_file_offers.items():
+                sender = meta["from"]
+                fname = meta["filename"]
+                fsize = meta["filesize"]
+                desc = meta.get("description", "")
+                print(f"- {fid}: {fname} ({fsize} bytes) from {sender} - {desc}")
+
     elif cmd == "exit":
         print("Goodbye!")
         break
