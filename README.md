@@ -79,7 +79,7 @@ Open Terminal and run:
 | Tic Tac Toe Game (with recovery) | Reviewer | Secondary | | Primary |
 | Group Creation / Messaging | Primary | Reviewer | Primary | Secondary |
 | Induced Packet Loss (Game & File) | | | Secondary | Reviewer |
-| Acknowledgement / Retry | Secondary | Reviewer | Primary | |
+| Acknowledgement / Retry | Secondary | Reviewer | | Primary |
 | **UI & Logging** | | | | |
 | Verbose Mode Support | Primary | | Secondary | Reviewer |
 | Terminal Grid Display | Reviewer | | Secondary | Primary |
@@ -87,7 +87,7 @@ Open Terminal and run:
 | **Testing and Validation** | | | | |
 | Inter-group Testing | Primary | Primary | | Secondary |
 | Correct Parsing Validation | Primary | Reviewer | Secondary | |
-| Token Expiry & IP Match | Secondary | | Primary | Reviewer |
+| Token Expiry & IP Match | Secondary | | Reviewer | Primary |
 | **Documentation & Coordination** | | | | |
 | RFC & Project Report | | Reviewer | | Secondary |
 | Milestone Tracking & Deliverables | Secondary | | Primary | Reviewer |
