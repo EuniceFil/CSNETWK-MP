@@ -89,7 +89,7 @@ Open Terminal and run:
 | Correct Parsing Validation | Primary | Reviewer | Secondary | |
 | Token Expiry & IP Match | Secondary | | Reviewer | Primary |
 | **Documentation & Coordination** | | | | |
-| RFC & Project Report | | Reviewer | | Secondary |
+| RFC & Project Report | | Reviewer | Secondary | Primary |
 | Milestone Tracking & Deliverables | Secondary | | Primary | Reviewer |
 
 ## Authors
