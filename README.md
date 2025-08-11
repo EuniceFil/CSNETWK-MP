@@ -1,16 +1,26 @@
 # Local Social Networking Protocol (LSNP)
 
 ### Running The Program
-
+#### Windows
 *  Non-verbose mode:
     ```
-    python3 profile.py Name
+    python LSNP.py <Name>
     ```
 *  Verbose mode:
     ```
-    python profile.py Name --verbose
+    python LSNP.py <Name> --verbose
     ```
-*  Name will be the names for each of the three terminals
+
+#### MAC
+*  Non-verbose mode:
+    ```
+    python3 LSNP.py <Name>
+    ```
+*  Verbose mode:
+    ```
+    python3 LSNP.py <Name> --verbose
+    ```
+*  <Name> will be the names for each of the three terminals
 
 ### Work Distribution Matrix
 
