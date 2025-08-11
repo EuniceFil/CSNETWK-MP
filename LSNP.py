@@ -10,15 +10,15 @@ import mimetypes
 # === Configuration ===
 PORT = 50999
 BROADCAST_ADDR = '255.255.255.255'
-# --- Constant for the broadcast interval ---
+
+# === Constant for the broadcast interval ===
 PROFILE_BROADCAST_INTERVAL = 300 # 1 min
 
-# --- Check for --verbose flag ---
+# === Check for --verbose flag ===
 VERBOSE = "--verbose" in sys.argv
 # We need to filter it out so it doesn't become the username
 if VERBOSE:
     sys.argv.remove("--verbose")
-# ------------------------------------
 USERNAME = sys.argv[1] if len(sys.argv) >= 2 else "Anonymous"
 
 try:
@@ -38,7 +38,7 @@ my_profile_data = {
     "name": USERNAME,
     "bio": "Just another peer on LSNP."
 }
-active_games = {} # Stores game instances by GAMEID
+active_games = {} 
 game_id_counter = 0
 dm_history = {}
 pending_acks = {}
@@ -48,16 +48,9 @@ MY_AVATAR_DATA = None
 MY_AVATAR_TYPE = None
 peer_avatars = {}
 incoming_avatar_chunks = {}
-
-# === File transfer state ===
-# Offers received but not yet accepted: fileid -> metadata
 pending_file_offers = {}
-# Accepted offers we are expecting chunks for: fileid -> {'filename', 'filesize', 'filetype', 'total_chunks', 'chunks': {idx: data}, 'from'}
 incoming_transfers = {}
-# Outgoing transfer records for bookkeeping if needed: fileid -> metadata
 outgoing_transfers = {}
-
-# Max chunk size in bytes (raw bytes before base64). Choose a value that keeps UDP packets reasonably sized.
 MAX_CHUNK_SIZE = 4096
 
 class TicTacToeGame:
@@ -137,8 +130,8 @@ def validate_token(token, expected_scope, sender_id):
         log("TOKEN !", f"FAIL: Malformed token from {sender_id}")
         return False
 
-# --- Profile Picture Functions ---
-CHUNK_SIZE = 1000  # A safe size for UDP payload
+# === Profile Picture Functions ===
+CHUNK_SIZE = 1000  
 
 def set_profile_picture(file_path):
     global MY_AVATAR_DATA, MY_AVATAR_TYPE
@@ -146,7 +139,7 @@ def set_profile_picture(file_path):
         with open(file_path, "rb") as image_file:
             image_data = image_file.read()
             
-            # Check if the file exceeds the 20 KB limit
+            # Image limit of 20 KB
             if len(image_data) > 20000:
                 print("Error: Image file exceeds the 20 KB limit.")
                 return
@@ -171,7 +164,6 @@ def set_profile_picture(file_path):
         print(f"Error setting profile picture: {e}")
 
 def broadcast_profile():
-    # This function now intelligently sends avatars
     profile_msg = {
         "type": "PROFILE",
         "user_id": MY_ID,
@@ -179,20 +171,19 @@ def broadcast_profile():
         "bio": my_profile_data["bio"]
     }
     
-    # If the encoded avatar data is small enough to fit in a single packet,
-    # send it all at once.
+    # If avatar is small
     if MY_AVATAR_DATA and len(MY_AVATAR_DATA) <= CHUNK_SIZE:
         profile_msg["AVATAR_TYPE"] = MY_AVATAR_TYPE
         profile_msg["AVATAR_ENCODING"] = "base64"
         profile_msg["AVATAR_DATA"] = MY_AVATAR_DATA
         send_message(profile_msg, (BROADCAST_ADDR, PORT))
     
-    # If it's too big, send the profile info first, then send the chunks.
+    # If avatar is big
     elif MY_AVATAR_DATA:
         send_message(profile_msg, (BROADCAST_ADDR, PORT))
         send_avatar_in_chunks(MY_AVATAR_DATA, MY_AVATAR_TYPE)
     
-    # If there's no avatar, just send the regular profile message.
+    # If there is no avatar
     else:
         send_message(profile_msg, (BROADCAST_ADDR, PORT))
 
@@ -231,7 +222,6 @@ def log(prefix, message):
 def send_message(data, addr):
     msg = '\n'.join(f"{k.upper()}: {v}" for k, v in data.items()) + "\n\n"
     log(f"SEND > [{data.get('type', 'UNKNOWN')}] to {addr[0]}:{addr[1]}", f"\n------\n{msg.strip()}\n------")
-    # Using a 'with' statement is safer for sockets in threads
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
         if addr[0].endswith('.255') or addr[0] == '255.255.255.255':
             s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
@@ -260,7 +250,6 @@ def send_follow_request(target_id):
         "token": generate_token(MY_ID, scope="follow")
     }
     
-    # Store the fact that we're waiting for an ACK for this follow action
     pending_acks[message_id] = {"type": "FOLLOW", "target": target_id}
     
     target_addr = peers[target_id]
@@ -283,7 +272,6 @@ def send_unfollow_request(target_id):
         "token": generate_token(MY_ID, scope="follow")
     }
 
-    # Store the action we are waiting on
     pending_acks[message_id] = {"type": "UNFOLLOW", "target": target_id}
     
     target_addr = peers.get(target_id)
@@ -291,21 +279,17 @@ def send_unfollow_request(target_id):
         send_message(msg, target_addr)
         print(f"[UNFOLLOW] Sent unfollow request to {target_id}. Waiting for acknowledgement...")
     else:
-        # If peer is offline, the ACK will never arrive, so we can't unfollow.
         print(f"Error: Peer {target_id} appears to be offline. Cannot send unfollow request.")
         if message_id in pending_acks:
             del pending_acks[message_id]
 
 def send_post_to_followers(content):
 
-    # Sends a post individually to each known follower.
-
     if not followers:
         return print("[POST] You have no followers to post to.")
 
     print(f"[POST] Sending post to {len(followers)} follower(s)...")
     
-    # Create the base message once
     timestamp = str(int(time.time()))
     post_msg = {
         "type": "POST",
@@ -317,14 +301,12 @@ def send_post_to_followers(content):
         "token": generate_token(MY_ID, scope="post")
     }
 
-    # Save the post to our own list before sending
     my_posts.append({"timestamp": timestamp, "content": content})
 
     # Loop through your followers and send a direct message to each one
     for follower_id in followers:
         if follower_id in peers:
             target_addr = peers[follower_id]
-            # Add the 'to' field for clarity, though not strictly required by handler
             post_msg['to'] = follower_id 
             send_message(post_msg, target_addr)
         else:
@@ -341,7 +323,6 @@ def send_dm(target_id, content):
 
     message_id = str(uuid.uuid4().hex)[:16]
     
-    # Create the message exactly as specified in the RFC
     msg = {
         "type": "DM",
         "from": MY_ID,
@@ -352,7 +333,7 @@ def send_dm(target_id, content):
         "token": generate_token(MY_ID, scope="chat")
     }
     
-    # Add to our local history immediately
+    # Add to local history immediately
     if target_id not in dm_history:
         dm_history[target_id] = []
     dm_history[target_id].append(('sent', time.time(), content))
@@ -361,9 +342,6 @@ def send_dm(target_id, content):
     pending_acks[message_id] = {"type": "DM", "target": target_id}
     target_addr = peers[target_id]
     
-    # Use the reliable send_message function from the ACK implementation
-    # (Assuming you have a function that handles retransmissions)
-    # For now, we'll just send it once and the ACK handler will do its job.
     send_message(msg, target_addr)
     print(f"DM sent to {target_id}.")
 
@@ -376,7 +354,7 @@ def send_like(post_index, action="LIKE"):
     except (ValueError, IndexError):
         return print(f"Error: Invalid post number. Use 'posts' to see the list.")
 
-    # Retrieve the post from our stored list (adjusting for 0-based index)
+    # Retrieve the post from stored list 
     post = posts_list[post_index - 1]
     
     target_id = post['sender']
@@ -395,7 +373,6 @@ def send_like(post_index, action="LIKE"):
         "token": generate_token(MY_ID, scope="broadcast")
     }
     
-    # Likes are sent directly to the post's author
     send_message(msg, peers[target_id])
     
     action_verb = "liked" if action == "LIKE" else "unliked"
@@ -409,10 +386,9 @@ def create_group(group_id, group_name, members_str):
         return print(f"Error: You are already in a group with ID '{group_id}'.")
 
     member_ids = {m.strip() for m in members_str.split(',') if m.strip()}
-    # The creator is always a member
+    # Creator is always a member
     member_ids.add(MY_ID)
     
-    # Check if all intended members are known peers
     for member_id in member_ids:
         if member_id != MY_ID and member_id not in peers:
             print(f"[Warning] Peer {member_id} is not currently known. They might not receive the group creation message.")
@@ -463,7 +439,6 @@ def send_group_message(group_id, content):
         if member_id != MY_ID and member_id in peers:
             send_message(msg, peers[member_id])
     
-    # Also display your own message
     print(f"[GROUP {group_info['name']}] You: {content}")
 
 def send_group_update(group_id, members_to_add=None, members_to_remove=None):
@@ -675,19 +650,14 @@ def try_assemble_file(fileid):
     # Reassemble chunks in order
     ordered_chunks = []
     for i in range(total):
-        # Append the base64 string chunks
         ordered_chunks.append(chunks[str(i)])
 
     try:
-        # First, join all the base64 strings into one large string
         raw_b64 = "".join(ordered_chunks)
-        # Then, decode the complete base64 string to get the raw file bytes
         raw = base64.b64decode(raw_b64)
     except Exception as e:
         log("DROP !", f"Failed to decode/reassemble file {fileid}: {e}")
-        # Send a failure notice back to the sender
         send_file_received(info["from"], fileid, status="FAILED")
-        # Cleanup
         del incoming_transfers[fileid]
         return
 
@@ -706,7 +676,6 @@ def try_assemble_file(fileid):
     except Exception as e:
         log("DROP !", f"Failed to write file {outname}: {e}")
         send_file_received(info["from"], fileid, status="FAILED")
-        # Cleanup
         del incoming_transfers[fileid]
         return
 
@@ -716,7 +685,6 @@ def try_assemble_file(fileid):
     # Send FILE_RECEIVED back to sender
     send_file_received(info["from"], fileid, status="COMPLETE")
 
-    # Cleanup
     del incoming_transfers[fileid]
 
 # === Tic-Tac-Toe Functions ===
@@ -821,7 +789,7 @@ def send_result(game_id, result_type, winning_line=None):
     print(f"\n[TICTACTOE] Game {game_id} finished. Result: {result}.")
     print("> ", end="", flush=True)
 
-# --- "ignore self" logic ---
+# === "ignore self" logic ===
 def handle_message(data, addr):
     sender_id = data.get("user_id") or data.get("from")
 
@@ -902,6 +870,7 @@ def handle_message(data, addr):
         if sender_id:
             known_profiles[sender_id] = (name, bio)
             peers[sender_id] = (addr[0], PORT)
+            # Print a notification about the received profile.
             print(f"\n[PROFILE] {sender_id}: {name} | {bio}")
 
             if 'avatar_data' in data and 'avatar_type' in data:
@@ -913,6 +882,7 @@ def handle_message(data, addr):
             print("> ", end="", flush=True)
 
     elif mtype == "PROFILE_CHUNK":
+        # Handle the profile avatar in chunks.
         sender_id = data.get("from")
         chunk_id = data.get("chunk_id")
         chunk_num = int(data.get("chunk_num", 0))
@@ -930,6 +900,7 @@ def handle_message(data, addr):
                 "type": avatar_type
             }
 
+         # Place the received chunk in the correct position.
         if chunk_num > 0 and chunk_num <= total_chunks:
             incoming_avatar_chunks[sender_id][chunk_id]["chunks"][chunk_num - 1] = chunk_data
             incoming_avatar_chunks[sender_id][chunk_id]["received"] += 1
@@ -1007,7 +978,6 @@ def handle_message(data, addr):
                 group_name = my_groups[group_id]['name']
                 sender_name = known_profiles.get(sender_id, (sender_id,))[0]
                 
-                # The new, clearer output format
                 print(f"\n[GROUP: {group_name}] {sender_name}: {content}")
             else:
                 log("DROP !", f"Group message from {sender_id} for group {group_id}, but they are not a member.")
@@ -1047,16 +1017,11 @@ def handle_message(data, addr):
             elif sender_id != MY_ID:
                 print(f"\nThe group “{group_name}” member list was updated.")
             print("> ", end="", flush=True)
-                
-    # === File transfer handlers ===
-    # ... (inside handle_message function) ...
 
     elif mtype == "FILE_OFFER":
         from_id = data.get("from")
         fileid = data.get("fileid")
-        # Check if the offer is for me
         if data.get("to") == MY_ID:
-            # Store the offer
             pending_file_offers[fileid] = data
             print(f"\n[FILE_OFFER from {from_id}] '{data['filename']}' ({data['filesize']} bytes, FileID: {fileid})")
             if data.get("description"):
@@ -1068,7 +1033,6 @@ def handle_message(data, addr):
         from_id = data.get("from")
         fileid = data.get("fileid")
         
-        # Check if this is an acceptance for one of our outgoing offers
         if fileid in outgoing_transfers and outgoing_transfers[fileid]["target"] == from_id:
             print(f"\n[FILE_ACCEPT] Peer {from_id} accepted offer for file {fileid}. Beginning transfer...")
             
@@ -1083,18 +1047,14 @@ def handle_message(data, addr):
         total_chunks = int(data.get("total_chunks"))
         chunk_data = data.get("data")
         
-        # Check if we are expecting this file
         if fileid in incoming_transfers:
             info = incoming_transfers[fileid]
-            # First chunk? Store total count
             if info["total_chunks"] is None:
                 info["total_chunks"] = total_chunks
                 print(f"\n[FILE] Starting transfer for {info['filename']}. Expecting {total_chunks} chunks.")
             
-            # Store the chunk data
             info["chunks"][str(chunk_index)] = chunk_data
             
-            # Check if all chunks are received
             if len(info["chunks"]) == info["total_chunks"]:
                 print(f"\n[FILE] All chunks for {info['filename']} received. Reassembling...")
                 try_assemble_file(fileid)
@@ -1105,19 +1065,16 @@ def handle_message(data, addr):
         fileid = data.get("fileid")
         status = data.get("status")
 
-        # Check if this is a receipt for a file we sent
         if fileid in outgoing_transfers and outgoing_transfers[fileid]["target"] == from_id:
             filename = outgoing_transfers[fileid]["filename"]
             if status == "COMPLETE":
                 print(f"\n[FILE_RECEIVED] Peer {from_id} successfully received '{filename}'.")
                 
-                # Cleanup the outgoing transfer record
                 del outgoing_transfers[fileid]
             else:
                 print(f"\n[FILE_RECEIVED] Peer {from_id} reported an issue with '{filename}' (Status: {status}).")
             print("> ", end="", flush=True)
 
-    # === Tic-Tac-Toe Message Handlers ===
     elif mtype == "TICTACTOE_INVITE":
         game_id = data.get("gameid")
         symbol = data.get("symbol", "").upper()
@@ -1254,7 +1211,7 @@ def listen():
             sys.stderr.write(f"\nError handling message: {e}\n")
             sys.stderr.flush()
 
-# --- The periodic broadcaster function ---
+# === Periodic Broadcaster ===
 def periodic_broadcaster():
     """This function runs in a separate thread to send profile updates."""
     while True:
@@ -1263,7 +1220,6 @@ def periodic_broadcaster():
         print("\n[Auto-Profile] Broadcasting profile...")
         broadcast_profile()
         print(f"> ", end="", flush=True)
-# ---------------------------------------------
 
 # === Start UDP Socket ===
 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -1276,7 +1232,7 @@ sock.bind(('', PORT))
 
 # === Start Threads ===
 threading.Thread(target=listen, daemon=True).start()
-# --- Starting the new periodic broadcaster thread ---
+# === Starting the new periodic broadcaster thread ===
 threading.Thread(target=periodic_broadcaster, daemon=True).start()
 
 # Announce our presence once on startup immediately
@@ -1352,22 +1308,20 @@ while True:
             print("Usage: profile set avatar <path_to_image>")
 
     elif cmd.startswith("profile set "):
-    # We split by space into exactly 4 parts for a valid command
         parts = cmd.split(" ", 3)
         if len(parts) < 4:
             print("Usage: profile set <name|bio> <new value>")
         else:
-            # parts[0] is "profile", parts[1] is "set"
             field = parts[2].lower()
             value = parts[3]
             if field == "name":
                 my_profile_data["name"] = value
                 print(f"Display name updated to: {value}")
-                broadcast_profile() # Immediately announce the change
+                broadcast_profile() 
             elif field == "bio":
                 my_profile_data["bio"] = value
                 print(f"Bio updated to: {value}")
-                broadcast_profile() # Immediately announce the change
+                broadcast_profile() 
             else:
                 print("Invalid field. Can only set 'name' or 'bio'.")
 
@@ -1548,7 +1502,6 @@ while True:
             for f_id in followers:
                 print(f"- {f_id}")
     
-    # === Tic-Tac-Toe Commands ===
     elif cmd.startswith("ttinvite "):
         parts = cmd.split(" ", 2)
         if len(parts) != 3:
@@ -1600,14 +1553,11 @@ while True:
                 print(f"- Game {game_id} against {game.opponent_id} ({game.my_symbol}) - {status}")
 
     elif cmd.startswith("fileoffer "):
-        # Usage: fileoffer <user_id> <filepath> [description]
         parts = cmd.split(" ", 2)
         if len(parts) < 3:
             print("Usage: fileoffer <user_id> <filepath> [description]")
         else:
-            # parts[2] may contain filepath and optional description - try to split sensibly
             rest = parts[2].strip()
-            # if description provided, we expect: "<filepath> <description...>"
             subparts = rest.split(" ", 1)
             filepath = subparts[0]
             desc = subparts[1] if len(subparts) == 2 else ""
