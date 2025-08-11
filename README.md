@@ -20,7 +20,7 @@
     ```
     python3 LSNP.py <Name> --verbose
     ```
-*  <Name> will be the names for each of the three terminals
+*  Note: Name will be the names for each of the three terminals
 
 ### Work Distribution Matrix
 
