@@ -654,14 +654,16 @@ def try_assemble_file(fileid):
         return
 
     # Reassemble chunks in order
-    ordered = []
+    ordered_chunks = []
     for i in range(total):
-        ordered.append(chunks[str(i)])
+        # We need to get the raw bytes, not the base64 string
+        ordered_chunks.append(chunks[str(i)])
+
     try:
-        raw_b64 = "".join(ordered)
-        raw = base64.b64decode(raw_b64)
+        # Join the raw byte chunks together
+        raw = b"".join(ordered_chunks)
     except Exception as e:
-        log("DROP !", f"Failed to decode/reassemble file {fileid}: {e}")
+        log("DROP !", f"Failed to reassemble file {fileid}: {e}")
         return
 
     filename = info["filename"]
@@ -1019,91 +1021,73 @@ def handle_message(data, addr):
             print("> ", end="", flush=True)
                 
     # === File transfer handlers ===
+    # ... (inside handle_message function) ...
+
     elif mtype == "FILE_OFFER":
-        # Received an offer; store it in pending_file_offers and prompt user per spec
         from_id = data.get("from")
-        to_id = data.get("to")
         fileid = data.get("fileid")
-        filename = data.get("filename")
-        filesize = data.get("filesize")
-        filetype = data.get("filetype")
-        description = data.get("description", "")
+        # Check if the offer is for me
+        if data.get("to") == MY_ID:
+            # Store the offer
+            pending_file_offers[fileid] = data
+            print(f"\n[FILE_OFFER from {from_id}] '{data['filename']}' ({data['filesize']} bytes, ID: {fileid})")
+            if data.get("description"):
+                print(f"  Description: {data['description']}")
+            print("To accept, use 'fileaccept <fileid>'.")
+            print("> ", end="", flush=True)
 
-        # Ensure offer is intended for us
-        if to_id != MY_ID:
-            return
-
-        # Validate token scope before advertising offer to user (optional but sensible)
-        if not validate_token(token, "file", from_id):
-            log("DROP !", f"FILE_OFFER from {from_id} failed token validation.")
-            return
-
-        pending_file_offers[fileid] = {
-            "from": from_id,
-            "filename": filename,
-            "filesize": filesize,
-            "filetype": filetype,
-            "description": description,
-            "timestamp": data.get("timestamp", "")
-        }
-
-        # Non-verbose printing (per spec)
-        sender_name = known_profiles.get(from_id, (from_id.split('@')[0],))[0]
-        print(f"\nUser {sender_name} is sending you a file do you accept? (fileid: {fileid})")
-        print("> ", end="", flush=True)
+    elif mtype == "FILE_ACCEPT":
+        from_id = data.get("from")
+        fileid = data.get("fileid")
+        
+        # Check if this is an acceptance for one of our outgoing offers
+        if fileid in outgoing_transfers and outgoing_transfers[fileid]["target"] == from_id:
+            print(f"\n[FILE_ACCEPT] Peer {from_id} accepted offer for file {fileid}. Beginning transfer...")
+            
+            # Start a new thread to send the chunks
+            threading.Thread(target=_send_file_chunks_async, args=(fileid,)).start()
+            print("> ", end="", flush=True)
 
     elif mtype == "FILE_CHUNK":
-        # Received chunk — store it only if offer accepted (incoming_transfers contains fileid)
         from_id = data.get("from")
-        to_id = data.get("to")
         fileid = data.get("fileid")
-        chunk_index = data.get("chunk_index")
-        total_chunks = data.get("total_chunks")
-        chunk_size = data.get("chunk_size")
-        b64data = data.get("data")
-        token = data.get("token", "")
-
-        # Only accept chunks if they are for us
-        if to_id != MY_ID:
-            return
-
-        # Token validation (must be file scope)
-        if not validate_token(token, "file", from_id):
-            log("DROP !", f"FILE_CHUNK from {from_id} failed token validation.")
-            return
-
-        # If this fileid is not in incoming_transfers (i.e., not accepted), ignore chunks
-        transfer = incoming_transfers.get(fileid)
-        if not transfer:
-            log("DROP !", f"Ignoring chunk for {fileid} because offer not accepted or unknown.")
-            return
-
-        # Initialize total_chunks if not set
-        if transfer["total_chunks"] is None and total_chunks:
-            try:
-                transfer["total_chunks"] = int(total_chunks)
-            except ValueError:
-                transfer["total_chunks"] = None
-
-        # Store the chunk (keep as base64 string for easier concatenation/assembly)
-        transfer["chunks"][chunk_index] = b64data
-        log("RECV <", f"Stored chunk {chunk_index} for {fileid} (from {from_id})")
-
-        # Check if we can assemble
-        try_assemble_file(fileid)
-        print("> ", end="", flush=True)
-
+        chunk_index = int(data.get("chunk_index"))
+        total_chunks = int(data.get("total_chunks"))
+        chunk_data = data.get("data")
+        
+        # Check if we are expecting this file
+        if fileid in incoming_transfers:
+            info = incoming_transfers[fileid]
+            # First chunk? Store total count
+            if info["total_chunks"] is None:
+                info["total_chunks"] = total_chunks
+                print(f"\n[FILE] Starting transfer for {info['filename']}. Expecting {total_chunks} chunks.")
+            
+            # Store the chunk data
+            info["chunks"][str(chunk_index)] = base64.b64decode(chunk_data.encode('ascii'))
+            
+            # Check if all chunks are received
+            if len(info["chunks"]) == info["total_chunks"]:
+                print(f"\n[FILE] All chunks for {info['filename']} received. Reassembling...")
+                try_assemble_file(fileid)
+            print("> ", end="", flush=True)
+            
     elif mtype == "FILE_RECEIVED":
-        # Sender receives notification; we can log it
         from_id = data.get("from")
-        to_id = data.get("to")
         fileid = data.get("fileid")
-        status = data.get("status", "")
-        if to_id == MY_ID:
-            log("RECV <", f"FILE_RECEIVED from {from_id} for {fileid}: {status}")
-            # Optionally cleanup outgoing_transfers
-            if fileid in outgoing_transfers:
+        status = data.get("status")
+
+        # Check if this is a receipt for a file we sent
+        if fileid in outgoing_transfers and outgoing_transfers[fileid]["target"] == from_id:
+            filename = outgoing_transfers[fileid]["filename"]
+            if status == "COMPLETE":
+                print(f"\n[FILE_RECEIVED] Peer {from_id} successfully received '{filename}'.")
+                
+                # Cleanup the outgoing transfer record
                 del outgoing_transfers[fileid]
+            else:
+                print(f"\n[FILE_RECEIVED] Peer {from_id} reported an issue with '{filename}' (Status: {status}).")
+            print("> ", end="", flush=True)
 
     # === Tic-Tac-Toe Message Handlers ===
     elif mtype == "TICTACTOE_INVITE":
