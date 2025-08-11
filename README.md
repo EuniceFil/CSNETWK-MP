@@ -29,16 +29,16 @@ Open Terminal and run:
     ```
     python3 --version
     ```
-If not installed, install Python via Homebrew:
+- If not installed, install Python via Homebrew:
     ```
     brew install python
     ```
-    
+
 2. Verify pip installation
     ```
     pip3 --version
     ```
-If not found, install pip with:
+- If not found, install pip with:
     ```
     python3 -m ensurepip --upgrade
     ```
