@@ -85,7 +85,7 @@ Open Terminal and run:
 | Terminal Grid Display | Reviewer | | Secondary | Primary |
 | Message Parsing & Debug Output | Secondary | Primary | Reviewer | Reviewer |
 | **Testing and Validation** | | | | |
-| Inter-group Testing | Primary | Primary | | Secondary |
+| Inter-group Testing | Primary | Primary | Secondary | Secondary |
 | Correct Parsing Validation | Primary | Reviewer | Secondary | |
 | Token Expiry & IP Match | Secondary | Secondary | Reviewer | Primary |
 | **Documentation & Coordination** | | | | |
