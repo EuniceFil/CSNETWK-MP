@@ -78,12 +78,12 @@ Open Terminal and run:
 | File Transfer (Offer, Chunk, ACK) | Reviewer | Primary | Reviewer | |
 | Tic Tac Toe Game (with recovery) | Reviewer | Secondary | | Primary |
 | Group Creation / Messaging | Primary | Reviewer | Primary | Secondary |
-| Induced Packet Loss (Game & File) | Reviewer | Primary | Secondary | Reviewer |
-| Acknowledgement / Retry | Secondary | Reviewer | | Primary |
+| Induced Packet Loss (Game & File) | Reviewer | Primary | Reviewer | Secondary |
+| Acknowledgement / Retry | Secondary | Reviewer | Reviewer | Primary |
 | **UI & Logging** | | | | |
 | Verbose Mode Support | Primary | | Secondary | Reviewer |
 | Terminal Grid Display | Reviewer | | Secondary | Primary |
-| Message Parsing & Debug Output | Secondary | Primary | | Reviewer |
+| Message Parsing & Debug Output | Secondary | Primary | Reviewer | Reviewer |
 | **Testing and Validation** | | | | |
 | Inter-group Testing | Primary | Primary | | Secondary |
 | Correct Parsing Validation | Primary | Reviewer | Secondary | |
