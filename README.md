@@ -72,7 +72,7 @@ Open Terminal and run:
 | **Network Communication** | | | | |
 | UDP Socket Setup | | Reviewer | Primary | Secondary |
 | mDNS Discovery Integration | | Reviewer | Primary | Secondary |
-| IP Address Logging | | Secondary | Primary | Reviewer |
+| IP Address Logging | Secondary | Secondary | Primary | Reviewer |
 | **Core Feature Implementation** | | | | |
 | Core Messaging (POST, DM, LIKE, FOLLOW) | Primary | Reviewer | Secondary | |
 | File Transfer (Offer, Chunk, ACK) | Reviewer | Primary | Reviewer | |
