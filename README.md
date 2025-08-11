@@ -75,7 +75,7 @@ Open Terminal and run:
 | IP Address Logging | Secondary | Secondary | Primary | Reviewer |
 | **Core Feature Implementation** | | | | |
 | Core Messaging (POST, DM, LIKE, FOLLOW) | Primary | Reviewer | Secondary | |
-| File Transfer (Offer, Chunk, ACK) | Reviewer | Primary | Reviewer | |
+| File Transfer (Offer, Chunk, ACK) | Reviewer | Primary | Reviewer | Secondary |
 | Tic Tac Toe Game (with recovery) | Reviewer | Secondary | | Primary |
 | Group Creation / Messaging | Primary | Reviewer | Primary | Secondary |
 | Induced Packet Loss (Game & File) | Reviewer | Primary | Reviewer | Primary |
