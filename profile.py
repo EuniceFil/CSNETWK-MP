@@ -162,8 +162,8 @@ def set_profile_picture(file_path):
                 MY_AVATAR_DATA = None
                 MY_AVATAR_TYPE = None
                 return
-            
-        print(f"Profile picture '{file_path}' set successfully. Broadcasting new profile...")
+        
+        print("Profile picture set. Broadcasting new profile...")
         broadcast_profile()
     except FileNotFoundError:
         print(f"Error: File not found at {file_path}")
@@ -616,6 +616,25 @@ def fileaccept_cmd(fileid):
     if not offer:
         print(f"Error: No pending file offer with id {fileid}. Use 'fileoffers' to list offers.")
         return
+        
+    # --- This is the new logic to send an acceptance message ---
+    sender_id = offer["from"]
+    if sender_id not in peers:
+        print(f"Error: Peer {sender_id} is no longer known. Cannot accept offer.")
+        return
+
+    # Create the FILE_ACCEPT message to send back to the original sender
+    msg = {
+        "type": "FILE_ACCEPT",
+        "from": MY_ID,
+        "to": sender_id,
+        "fileid": fileid,
+        "timestamp": str(int(time.time())),
+        "token": generate_token(MY_ID, scope="file")
+    }
+    send_message(msg, peers[sender_id])
+    # -----------------------------------------------------------
+
     # Mark that we accept this file — create incoming_transfers entry
     incoming_transfers[fileid] = {
         "filename": offer["filename"],
@@ -625,9 +644,11 @@ def fileaccept_cmd(fileid):
         "total_chunks": None,  # to be set when the first chunk arrives
         "chunks": {}
     }
+    
     # Remove from pending offers
     del pending_file_offers[fileid]
-    print(f"[FILE] Accepted offer {fileid}. Waiting for chunks...")
+    
+    print(f"[FILE] Accepted offer {fileid}. Notified sender to begin transfer.")
 
 def send_file_received(target_id, fileid, status="COMPLETE"):
     msg = {
@@ -1104,6 +1125,27 @@ def handle_message(data, addr):
             # Optionally cleanup outgoing_transfers
             if fileid in outgoing_transfers:
                 del outgoing_transfers[fileid]
+        
+    elif mtype == "FILE_ACCEPT":
+        # Received confirmation that the peer accepted our offer.
+        from_id = data.get("from")
+        to_id = data.get("to")
+        fileid = data.get("fileid")
+        token = data.get("token", "")
+
+        # Validate this message is for us and the token is good
+        if to_id != MY_ID or not validate_token(token, "file", from_id):
+            return
+
+        # Check if this is a valid, pending outgoing transfer
+        if fileid in outgoing_transfers and not outgoing_transfers[fileid].get("sent"):
+            log("RECV <", f"Peer {from_id} accepted file {fileid}. Starting transfer.")
+            
+            # Start sending the file chunks in a separate, non-blocking thread
+            threading.Thread(target=_send_file_chunks_async, args=(fileid,), daemon=True).start()
+            
+        else:
+            log("DROP !", f"Received FILE_ACCEPT for unknown or already sent fileid: {fileid}")
 
     # === Tic-Tac-Toe Message Handlers ===
     elif mtype == "TICTACTOE_INVITE":
@@ -1281,8 +1323,8 @@ while True:
         print("Available commands:")
         print("  peers                                  - List known peers")
         print("  profile set <name|bio> <value>         - Update your profile name or bio")
-        print("  profile set avatar <path>              - Add your profile picture from a local file")
-        print("  profile view [user_id]                 - View your or another user's profile")
+        print("  profile set avatar <file_name>         - Add your profile picture from a local file")
+        print("  profile view avatar <user_id>          - View a peer's profile picture")
         print("  post <message>                         - Send a post to followers")
         print("  posts                                  - List of posts of the users you are following")
         print("  myposts                                - List your own sent posts")
@@ -1359,42 +1401,13 @@ while True:
             else:
                 print("Invalid field. Can only set 'name' or 'bio'.")
 
-    elif cmd.startswith("profile view"):
-        parts = cmd.split(" ", 2)
-        if len(parts) == 3:
-            user_id = parts[2]
-            
-            # Check if the user is trying to view their own profile
-            if user_id == MY_ID:
-                print("--- Your Profile ---")
-                print(f"Name: {my_profile_data['name']}")
-                print(f"Bio: {my_profile_data['bio']}")
-                if MY_AVATAR_DATA:
-                    print(f"Profile picture is set. Type: {MY_AVATAR_TYPE}")
-                else:
-                    print("No profile picture is currently set.")
-            elif user_id in known_profiles:
-                name, bio = known_profiles[user_id]
-                print(f"--- Profile for {name} ({user_id}) ---")
-                print(f"Name: {name}")
-                print(f"Bio: {bio}")
-                if user_id in peer_avatars:
-                    print("Profile picture: Yes")
-                else:
-                    print("Profile picture: No")
-            else:
-                print(f"Error: Peer {user_id} not found.")
-        elif len(parts) == 2:
-            # Displays my own profile by default
-            print("--- Your Profile ---")
-            print(f"Name: {my_profile_data['name']}")
-            print(f"Bio: {my_profile_data['bio']}")
-            if MY_AVATAR_DATA:
-                print(f"Profile picture is set. Type: {MY_AVATAR_TYPE}")
-            else:
-                print("No profile picture is currently set.")
+    elif cmd.startswith("profile view avatar "):
+        parts = cmd.split(" ", 3)
+        if len(parts) == 4:
+            user_id = parts[3]
+            view_profile_picture(user_id)
         else:
-            print("Usage: profile view [user_id]")
+            print("Usage: profile view avatar <user_id>")
 
     elif cmd.startswith("post "):
         try:
