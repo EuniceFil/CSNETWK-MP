@@ -87,7 +87,7 @@ Open Terminal and run:
 | **Testing and Validation** | | | | |
 | Inter-group Testing | Primary | Primary | | Secondary |
 | Correct Parsing Validation | Primary | Reviewer | Secondary | |
-| Token Expiry & IP Match | Secondary | | Reviewer | Primary |
+| Token Expiry & IP Match | Secondary | Secondary | Reviewer | Primary |
 | **Documentation & Coordination** | | | | |
 | RFC & Project Report | Reviewer | Secondary | Secondary | Primary |
 | Milestone Tracking & Deliverables | Secondary | | Primary | Reviewer |
