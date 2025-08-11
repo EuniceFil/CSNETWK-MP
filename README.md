@@ -1,7 +1,49 @@
 # Local Social Networking Protocol (LSNP)
 
+### Installing Software Requirements
+Before running the LSNP program, make sure your system has the required software installed.
+
+Software Requirements
+* Python (version 3.8 or above recommended)
+* pip (Python package installer)
+
+#### Windows
+1. Check if Python is installed
+Open Terminal and run:
+    ```
+    python --version
+    ```
+If you see a version number, Python is already installed.
+If not, download Python and install it:
+* https://www.python.org/downloads/windows/
+
+2. Verify pip installation
+    ```
+    pip --version
+    ```
+If pip is not found, reinstall Python and ensure pip is included.
+
+#### MAC
+1. Check if Python is installed
+Open Terminal and run:
+    ```
+    python3 --version
+    ```
+If not installed, install Python via Homebrew:
+    ```
+    brew install python
+    ```
+2. Verify pip installation
+    ```
+    pip3 --version
+    ```
+If not found, install pip with:
+    ```
+    python3 -m ensurepip --upgrade
+    ```
+
 ### Running The Program
-#### Windows Version
+#### Windows
 *  Non-verbose mode:
     ```
     python LSNP.py <Name>
@@ -11,7 +53,7 @@
     python LSNP.py <Name> --verbose
     ```
 
-#### MAC Version
+#### MAC
 *  Non-verbose mode:
     ```
     python3 LSNP.py <Name>
@@ -20,7 +62,7 @@
     ```
     python3 LSNP.py <Name> --verbose
     ```
-*  Note: Name will be the names for each of the three terminals
+*  Replace <Name> with a unique name for each terminal (e.g., Alice, Bob, Charlie). This name will serve as the identifier for each peer in the local network.
 
 ### Work Distribution Matrix
 
@@ -58,7 +100,7 @@
 ## AI Use Declaration
 During the preparation of this work the authors used ChatGPT, CoPilot and Gemini for the following purposes:
 1. Generating portions of the source code 
-2. To refine and improve written content
+2. Provide assistance in documentation
 3. Provide coding assistance such as debugging errors in code
 4. Understanding the syntax and protocol-related concepts
 5. Providing commands for running the features of the program
