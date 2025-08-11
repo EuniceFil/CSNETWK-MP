@@ -11,7 +11,7 @@ import mimetypes
 PORT = 50999
 BROADCAST_ADDR = '255.255.255.255'
 # --- Constant for the broadcast interval ---
-PROFILE_BROADCAST_INTERVAL = 30 # 1 min
+PROFILE_BROADCAST_INTERVAL = 300 # 1 min
 
 # --- Check for --verbose flag ---
 VERBOSE = "--verbose" in sys.argv
@@ -33,6 +33,7 @@ followers = set()
 following = set()
 known_profiles = {}
 posts_list = []
+my_posts = []
 my_profile_data = {
     "name": USERNAME,
     "bio": "Just another peer on LSNP."
@@ -161,8 +162,8 @@ def set_profile_picture(file_path):
                 MY_AVATAR_DATA = None
                 MY_AVATAR_TYPE = None
                 return
-        
-        print("Profile picture set. Broadcasting new profile...")
+            
+        print(f"Profile picture '{file_path}' set successfully. Broadcasting new profile...")
         broadcast_profile()
     except FileNotFoundError:
         print(f"Error: File not found at {file_path}")
@@ -305,15 +306,19 @@ def send_post_to_followers(content):
     print(f"[POST] Sending post to {len(followers)} follower(s)...")
     
     # Create the base message once
+    timestamp = str(int(time.time()))
     post_msg = {
         "type": "POST",
         "user_id": MY_ID,
         "content": content,
         "ttl": "3600",
         "message_id": str(uuid.uuid4().hex), #random
-        "timestamp": str(int(time.time())),
+        "timestamp": timestamp,
         "token": generate_token(MY_ID, scope="post")
     }
+
+    # Save the post to our own list before sending
+    my_posts.append({"timestamp": timestamp, "content": content})
 
     # Loop through your followers and send a direct message to each one
     for follower_id in followers:
@@ -461,6 +466,49 @@ def send_group_message(group_id, content):
     # Also display your own message
     print(f"[GROUP {group_info['name']}] You: {content}")
 
+def send_group_update(group_id, members_to_add=None, members_to_remove=None):
+    """Constructs and sends a GROUP_UPDATE message to relevant peers."""
+    if group_id not in my_groups:
+        return print(f"Error: You are not in group '{group_id}'.")
+    
+    if not members_to_add and not members_to_remove:
+        return print("Error: You must specify members to add or remove.")
+
+    current_info = my_groups[group_id]
+    current_members = current_info["members"]
+
+    # Any member is authorized to make changes in this implementation.
+    if MY_ID not in current_members:
+         return print(f"Error: You are no longer a member of '{group_id}' and cannot modify it.")
+
+    msg = {
+        "type": "GROUP_UPDATE",
+        "from": MY_ID,
+        "group_id": group_id,
+        "timestamp": str(int(time.time())),
+        "token": generate_token(MY_ID, scope="group")
+    }
+
+    # Add optional fields if they contain data
+    if members_to_add:
+        msg["add"] = ",".join(members_to_add)
+    if members_to_remove:
+        msg["remove"] = ",".join(members_to_remove)
+
+    # Recipients are all current members plus any newly added members.
+    recipients = current_members.union(members_to_add or set())
+
+    print(f"Sending update for group '{current_info['name']}' to {len(recipients)} peers...")
+
+    for member_id in recipients:
+        if member_id == MY_ID:
+             # Handle locally immediately to update own state
+             handle_message(msg, (MY_IP, PORT))
+        elif member_id in peers:
+            send_message(msg, peers[member_id])
+        else:
+            print(f"[Warning] Peer {member_id} is not currently known. They may not receive the group update.")
+
 # === File transfer helpers ===
 def make_fileid():
     return uuid.uuid4().hex[:8]
@@ -568,6 +616,25 @@ def fileaccept_cmd(fileid):
     if not offer:
         print(f"Error: No pending file offer with id {fileid}. Use 'fileoffers' to list offers.")
         return
+    
+    # Construct the acceptance message to send back to the offerer
+    sender_id = offer["from"]
+    if sender_id not in peers:
+        print(f"Error: Cannot accept offer, peer {sender_id} is no longer known.")
+        return
+
+    accept_msg = {
+        "type": "FILE_ACCEPT",
+        "from": MY_ID,
+        "to": sender_id,
+        "fileid": fileid,
+        "timestamp": str(int(time.time())),
+        "token": generate_token(MY_ID, scope="file")
+    }
+
+    # Send the acceptance message back to the original sender
+    send_message(accept_msg, peers[sender_id])
+
     # Mark that we accept this file — create incoming_transfers entry
     incoming_transfers[fileid] = {
         "filename": offer["filename"],
@@ -606,14 +673,22 @@ def try_assemble_file(fileid):
         return
 
     # Reassemble chunks in order
-    ordered = []
+    ordered_chunks = []
     for i in range(total):
-        ordered.append(chunks[str(i)])
+        # Append the base64 string chunks
+        ordered_chunks.append(chunks[str(i)])
+
     try:
-        raw_b64 = "".join(ordered)
+        # First, join all the base64 strings into one large string
+        raw_b64 = "".join(ordered_chunks)
+        # Then, decode the complete base64 string to get the raw file bytes
         raw = base64.b64decode(raw_b64)
     except Exception as e:
         log("DROP !", f"Failed to decode/reassemble file {fileid}: {e}")
+        # Send a failure notice back to the sender
+        send_file_received(info["from"], fileid, status="FAILED")
+        # Cleanup
+        del incoming_transfers[fileid]
         return
 
     filename = info["filename"]
@@ -630,6 +705,9 @@ def try_assemble_file(fileid):
             f.write(raw)
     except Exception as e:
         log("DROP !", f"Failed to write file {outname}: {e}")
+        send_file_received(info["from"], fileid, status="FAILED")
+        # Cleanup
+        del incoming_transfers[fileid]
         return
 
     # Inform user per spec (only print when all chunks completed)
@@ -748,8 +826,9 @@ def handle_message(data, addr):
     sender_id = data.get("user_id") or data.get("from")
 
     # Critical check to prevent processing your own broadcast messages, but allow targeted self-messages (like group create)
-    if sender_id == MY_ID and data.get('to') != MY_ID and data.get('type') != 'GROUP_CREATE':
+    if sender_id == MY_ID and data.get('to') != MY_ID and data.get('type') not in ['GROUP_CREATE', 'GROUP_UPDATE']:
         return
+
 
     mtype = data.get("type", "").upper()
     message_id = data.get("message_id")
@@ -759,6 +838,7 @@ def handle_message(data, addr):
         # These are critical requests, so we ACK them.
         ack_msg = {"type": "ACK", "message_id": message_id, "status": "RECEIVED"}
         send_message(ack_msg, addr)
+        print("> ", end="", flush=True)
 
     if mtype == "FOLLOW":
         from_id = data.get("from")
@@ -914,7 +994,7 @@ def handle_message(data, addr):
             
             # Print non-verbose message only if we are not the creator
             if sender_id != MY_ID:
-                print(f"\nYou’ve been added to {group_name}")
+                print(f"\nYou've been added to {group_name}")
                 print("> ", end="", flush=True)
 
     elif mtype == "GROUP_MESSAGE":
@@ -924,97 +1004,117 @@ def handle_message(data, addr):
         if validate_token(token, "group", sender_id) and group_id in my_groups:
             # Security check: ensure the sender is actually in the group according to our local state
             if sender_id in my_groups[group_id]["members"]:
-                print(f'\n{sender_id} sent “{content}”')
+                group_name = my_groups[group_id]['name']
+                sender_name = known_profiles.get(sender_id, (sender_id,))[0]
+                
+                # The new, clearer output format
+                print(f"\n[GROUP: {group_name}] {sender_name}: {content}")
             else:
                 log("DROP !", f"Group message from {sender_id} for group {group_id}, but they are not a member.")
             print("> ", end="", flush=True)
 
+    elif mtype == "GROUP_UPDATE":
+        group_id = data.get("group_id")
+        
+        if not group_id or not sender_id or not validate_token(token, "group", sender_id):
+            return # Basic validation failed
+
+        add_list = {m.strip() for m in data.get("add", "").split(',') if m.strip()}
+        remove_list = {m.strip() for m in data.get("remove", "").split(',') if m.strip()}
+
+        # Case 1: An invitation for me to a new group via an update.
+        if group_id not in my_groups and MY_ID in add_list:
+            # Create a placeholder group. Name is unknown until a GROUP_CREATE or other message arrives.
+            log("GROUP !", f"Added to new group '{group_id}' via GROUP_UPDATE from {sender_id}.")
+            my_groups[group_id] = {"name": group_id, "members": {sender_id, MY_ID}}
+            print(f"\nYou have been added to the group '{group_id}'.")
+
+        # Case 2: An update for a group I am already in.
+        elif group_id in my_groups:
+            # Sender must be a member to authorize a change.
+            if sender_id not in my_groups[group_id]["members"]:
+                log("DROP !", f"Rejected GROUP_UPDATE from non-member {sender_id} for group {group_id}")
+                return
+            
+            current_members = my_groups[group_id]["members"]
+            updated_members = (current_members.union(add_list)) - remove_list
+            my_groups[group_id]["members"] = updated_members
+            
+            group_name = my_groups[group_id]['name']
+            if MY_ID in remove_list:
+                print(f"\nYou have been removed from the group '{group_name}'.")
+                del my_groups[group_id]
+            elif sender_id != MY_ID:
+                print(f"\nThe group “{group_name}” member list was updated.")
+            print("> ", end="", flush=True)
+                
     # === File transfer handlers ===
+    # ... (inside handle_message function) ...
+
     elif mtype == "FILE_OFFER":
-        # Received an offer; store it in pending_file_offers and prompt user per spec
         from_id = data.get("from")
-        to_id = data.get("to")
         fileid = data.get("fileid")
-        filename = data.get("filename")
-        filesize = data.get("filesize")
-        filetype = data.get("filetype")
-        description = data.get("description", "")
+        # Check if the offer is for me
+        if data.get("to") == MY_ID:
+            # Store the offer
+            pending_file_offers[fileid] = data
+            print(f"\n[FILE_OFFER from {from_id}] '{data['filename']}' ({data['filesize']} bytes, FileID: {fileid})")
+            if data.get("description"):
+                print(f"  Description: {data['description']}")
+            print("To accept, use 'fileaccept <fileid>'.")
+            print("> ", end="", flush=True)
 
-        # Ensure offer is intended for us
-        if to_id != MY_ID:
-            return
-
-        # Validate token scope before advertising offer to user (optional but sensible)
-        if not validate_token(token, "file", from_id):
-            log("DROP !", f"FILE_OFFER from {from_id} failed token validation.")
-            return
-
-        pending_file_offers[fileid] = {
-            "from": from_id,
-            "filename": filename,
-            "filesize": filesize,
-            "filetype": filetype,
-            "description": description,
-            "timestamp": data.get("timestamp", "")
-        }
-
-        # Non-verbose printing (per spec)
-        sender_name = known_profiles.get(from_id, (from_id.split('@')[0],))[0]
-        print(f"\nUser {sender_name} is sending you a file do you accept? (fileid: {fileid})")
-        print("> ", end="", flush=True)
+    elif mtype == "FILE_ACCEPT":
+        from_id = data.get("from")
+        fileid = data.get("fileid")
+        
+        # Check if this is an acceptance for one of our outgoing offers
+        if fileid in outgoing_transfers and outgoing_transfers[fileid]["target"] == from_id:
+            print(f"\n[FILE_ACCEPT] Peer {from_id} accepted offer for file {fileid}. Beginning transfer...")
+            
+            # Start a new thread to send the chunks
+            threading.Thread(target=_send_file_chunks_async, args=(fileid,)).start()
+            print("> ", end="", flush=True)
 
     elif mtype == "FILE_CHUNK":
-        # Received chunk — store it only if offer accepted (incoming_transfers contains fileid)
         from_id = data.get("from")
-        to_id = data.get("to")
         fileid = data.get("fileid")
-        chunk_index = data.get("chunk_index")
-        total_chunks = data.get("total_chunks")
-        chunk_size = data.get("chunk_size")
-        b64data = data.get("data")
-        token = data.get("token", "")
-
-        # Only accept chunks if they are for us
-        if to_id != MY_ID:
-            return
-
-        # Token validation (must be file scope)
-        if not validate_token(token, "file", from_id):
-            log("DROP !", f"FILE_CHUNK from {from_id} failed token validation.")
-            return
-
-        # If this fileid is not in incoming_transfers (i.e., not accepted), ignore chunks
-        transfer = incoming_transfers.get(fileid)
-        if not transfer:
-            log("DROP !", f"Ignoring chunk for {fileid} because offer not accepted or unknown.")
-            return
-
-        # Initialize total_chunks if not set
-        if transfer["total_chunks"] is None and total_chunks:
-            try:
-                transfer["total_chunks"] = int(total_chunks)
-            except ValueError:
-                transfer["total_chunks"] = None
-
-        # Store the chunk (keep as base64 string for easier concatenation/assembly)
-        transfer["chunks"][chunk_index] = b64data
-        log("RECV <", f"Stored chunk {chunk_index} for {fileid} (from {from_id})")
-
-        # Check if we can assemble
-        try_assemble_file(fileid)
-        print("> ", end="", flush=True)
-
+        chunk_index = int(data.get("chunk_index"))
+        total_chunks = int(data.get("total_chunks"))
+        chunk_data = data.get("data")
+        
+        # Check if we are expecting this file
+        if fileid in incoming_transfers:
+            info = incoming_transfers[fileid]
+            # First chunk? Store total count
+            if info["total_chunks"] is None:
+                info["total_chunks"] = total_chunks
+                print(f"\n[FILE] Starting transfer for {info['filename']}. Expecting {total_chunks} chunks.")
+            
+            # Store the chunk data
+            info["chunks"][str(chunk_index)] = chunk_data
+            
+            # Check if all chunks are received
+            if len(info["chunks"]) == info["total_chunks"]:
+                print(f"\n[FILE] All chunks for {info['filename']} received. Reassembling...")
+                try_assemble_file(fileid)
+            print("> ", end="", flush=True)
+            
     elif mtype == "FILE_RECEIVED":
-        # Sender receives notification; we can log it
         from_id = data.get("from")
-        to_id = data.get("to")
         fileid = data.get("fileid")
-        status = data.get("status", "")
-        if to_id == MY_ID:
-            log("RECV <", f"FILE_RECEIVED from {from_id} for {fileid}: {status}")
-            # Optionally cleanup outgoing_transfers
-            if fileid in outgoing_transfers:
+        status = data.get("status")
+
+        # Check if this is a receipt for a file we sent
+        if fileid in outgoing_transfers and outgoing_transfers[fileid]["target"] == from_id:
+            filename = outgoing_transfers[fileid]["filename"]
+            if status == "COMPLETE":
+                print(f"\n[FILE_RECEIVED] Peer {from_id} successfully received '{filename}'.")
+                
+                # Cleanup the outgoing transfer record
                 del outgoing_transfers[fileid]
+            else:
+                print(f"\n[FILE_RECEIVED] Peer {from_id} reported an issue with '{filename}' (Status: {status}).")
             print("> ", end="", flush=True)
 
     # === Tic-Tac-Toe Message Handlers ===
@@ -1023,10 +1123,10 @@ def handle_message(data, addr):
         symbol = data.get("symbol", "").upper()
         from_id = data.get("from")
         to_id = data.get("to")
-
+        
         # Verbose log for incoming invite
         log("RECV <", f"TICTACTOE_INVITE from {from_id} for game {game_id}. My symbol will be '{'O' if symbol == 'X' else 'X'}'.")
-        
+
         # Validation
         if not game_id or not game_id.startswith("g") or not game_id[1:].isdigit() or not (0 <= int(game_id[1:]) <= 255):
             print(f"\n[TICTACTOE] Invalid GAMEID '{game_id}'. Ignoring invite.")
@@ -1055,14 +1155,14 @@ def handle_message(data, addr):
         print("> ", end="", flush=True)
         
     elif mtype == "TICTACTOE_MOVE":
+        from_id = data.get("from")
         game_id = data.get("gameid")
         position = data.get("position")
         symbol = data.get("symbol", "").upper()
-        from_id = data.get("from")
 
         # Verbose log for incoming move
         log("RECV <", f"TICTACTOE_MOVE from {from_id} for game {game_id}. Position: {position}, Symbol: {symbol}.")
-
+        
         # Validation
         try:
             position = int(position)
@@ -1095,12 +1195,11 @@ def handle_message(data, addr):
             return
 
         # Token validation for moves
-        token = data.get("token", "")
         if not validate_token(token, "game", from_id):
             print(f"\n[TICTACTOE] Invalid token for move in game {game_id}. Ignoring.")
             log("DROP !", f"Invalid token for TICTACTOE_MOVE from {from_id}.")
             return
-
+        
         game.is_my_turn = True
         game.display_board()  # Non-verbose: just print board
 
@@ -1192,31 +1291,35 @@ while True:
     
     if cmd == "help":
         print("Available commands:")
-        print("  peers                                - List known peers")
-        print("  profile set <name|bio> <value>       - Update your profile name or bio")
-        print("  profile set avatar <path>            - Add your profile picture from a local file")
-        print("  profile view avatar <user_id>        - View a peer's profile picture")
-        print("  post <message>                       - Send a post to followers")
-        print("  posts                                - List of posts of the users you are following")
-        print("  like <post number>                   - Like a post")  
-        print("  unlike <post number>                 - Unlike a post")  
-        print("  follow <user_id>                     - Follow a user")
-        print("  unfollow <user_id>                   - Unfollow a user")
-        print("  following                            - List users you are following")
-        print("  followers                            - List your followers")
-        print("  dm <user_id> <message>               - Send a private message")
-        print("  dms [user_id]                        - View DM history")
-        print("  fileoffer <user_id> <filepath> [desc]- Offer a file to a peer")
-        print("  fileaccept <fileid>                  - Accept a pending file offer")
-        print("  fileoffers                           - List pending file offers")
-        print("  group create <id> <name> <members>   - Create a group (members are comma-separated IDs)")
-        print("  gsend <group_id> <message>           - Send a message to a group")
-        print("  groups                               - List the groups you are in")
-        print("  ttinvite <user_id> <X|O>             - Invite a user to a tic-tac-toe game")
-        print("  ttmove <gameid> <position>           - Make a move in an active game")
-        print("  ttaccept <gameid> <pos>              - Accept an invite and make your first move")
-        print("  ttgames                              - List active games")
-        print("  exit                                 - Quit")
+        print("  peers                                  - List known peers")
+        print("  profile set <name|bio> <value>         - Update your profile name or bio")
+        print("  profile set avatar <path>              - Add your profile picture from a local file")
+        print("  profile view [user_id]                 - View your or another user's profile")
+        print("  post <message>                         - Send a post to followers")
+        print("  posts                                  - List of posts of the users you are following")
+        print("  myposts                                - List your own sent posts")
+        print("  like <post number>                     - Like a post")  
+        print("  unlike <post number>                   - Unlike a post")  
+        print("  follow <user_id>                       - Follow a user")
+        print("  unfollow <user_id>                     - Unfollow a user")
+        print("  following                              - List users you are following")
+        print("  followers                              - List your followers")
+        print("  dm <user_id> <message>                 - Send a private message")
+        print("  dms [user_id]                          - View DM history")
+        print("  fileoffer <user_id> <filepath> [desc]  - Offer a file to a peer")
+        print("  fileaccept <fileid>                    - Accept a pending file offer")
+        print("  fileoffers                             - List pending file offers")
+        print("  group create <id> <name> <members>     - Create a group (members are comma-separated IDs)")
+        print("  gsend <group_id> <message>             - Send a message to a group")
+        print("  groups                                 - List the groups you are in")
+        print("  group info <id>                        - List the members of a specific group")
+        print("  group add <id> <members>               - Add members to a group")
+        print("  group remove <id> <members>            - Remove members from a group")
+        print("  ttinvite <user_id> <X|O>               - Invite a user to a tic-tac-toe game")
+        print("  ttmove <gameid> <position>             - Make a move in an active game")
+        print("  ttaccept <gameid> <pos>                - Accept an invite and make your first move")
+        print("  ttgames                                - List active games")
+        print("  exit                                   - Quit")
 
     elif cmd.startswith("follow "):
         try:
@@ -1268,13 +1371,42 @@ while True:
             else:
                 print("Invalid field. Can only set 'name' or 'bio'.")
 
-    elif cmd.startswith("profile view avatar "):
-        parts = cmd.split(" ", 3)
-        if len(parts) == 4:
-            user_id = parts[3]
-            view_profile_picture(user_id)
+    elif cmd.startswith("profile view"):
+        parts = cmd.split(" ", 2)
+        if len(parts) == 3:
+            user_id = parts[2]
+            
+            # Check if the user is trying to view their own profile
+            if user_id == MY_ID:
+                print("--- Your Profile ---")
+                print(f"Name: {my_profile_data['name']}")
+                print(f"Bio: {my_profile_data['bio']}")
+                if MY_AVATAR_DATA:
+                    print(f"Profile picture is set. Type: {MY_AVATAR_TYPE}")
+                else:
+                    print("No profile picture is currently set.")
+            elif user_id in known_profiles:
+                name, bio = known_profiles[user_id]
+                print(f"--- Profile for {name} ({user_id}) ---")
+                print(f"Name: {name}")
+                print(f"Bio: {bio}")
+                if user_id in peer_avatars:
+                    print("Profile picture: Yes")
+                else:
+                    print("Profile picture: No")
+            else:
+                print(f"Error: Peer {user_id} not found.")
+        elif len(parts) == 2:
+            # Displays my own profile by default
+            print("--- Your Profile ---")
+            print(f"Name: {my_profile_data['name']}")
+            print(f"Bio: {my_profile_data['bio']}")
+            if MY_AVATAR_DATA:
+                print(f"Profile picture is set. Type: {MY_AVATAR_TYPE}")
+            else:
+                print("No profile picture is currently set.")
         else:
-            print("Usage: profile view avatar <user_id>")
+            print("Usage: profile view [user_id]")
 
     elif cmd.startswith("post "):
         try:
@@ -1284,14 +1416,25 @@ while True:
             print("Usage: post <message>")
 
     elif cmd == "posts":
-        print("--- Recent Posts ---")
+        print("--- Recent Posts from Following ---")
         if not posts_list:
             print("No posts to show. Follow someone and wait for them to post.")
         else:
             for i, post in enumerate(posts_list, 1):
                 name = known_profiles.get(post['sender'], (post['sender'],))[0]
                 print(f"[{i}] From {name}: {post['content']}")
-                
+    
+    elif cmd == "myposts":
+        print("--- Your Posts ---")
+        if not my_posts:
+            print("You have not created any posts yet.")
+        else:
+            # Sort by timestamp, newest first
+            sorted_posts = sorted(my_posts, key=lambda p: int(p['timestamp']), reverse=True)
+            for i, post in enumerate(sorted_posts, 1):
+                ts = int(post['timestamp'])
+                print(f"[{i}] [{time.ctime(ts)}] {post['content']}")
+
     elif cmd.startswith("like "):
         _, post_num = cmd.split(" ", 1)
         send_like(post_num, "LIKE")
@@ -1299,104 +1442,162 @@ while True:
     elif cmd.startswith("unlike "):
         _, post_num = cmd.split(" ", 1)
         send_like(post_num, "UNLIKE")
-    
+
     elif cmd.startswith("dm "):
-        try:
-            _, target_id, content = cmd.split(" ", 2)
-            send_dm(target_id, content)
-        except ValueError:
+        parts = cmd.split(" ", 2)
+        if len(parts) == 3:
+            send_dm(parts[1], parts[2])
+        else:
             print("Usage: dm <user_id> <message>")
 
     elif cmd.startswith("dms"):
         parts = cmd.split(" ", 1)
-        if len(parts) == 1:
-            # List all DM conversations
-            if not dm_history:
-                print("No DM history.")
-            else:
-                print("--- DM Conversations ---")
-                for user_id in dm_history:
-                    name = known_profiles.get(user_id, (user_id,))[0]
-                    last_msg_type, _, last_msg_content = dm_history[user_id][-1]
-                    sent_or_recvd = "Sent" if last_msg_type == "sent" else "Received"
-                    print(f"- {name} ({user_id}): {sent_or_recvd} last message: \"{last_msg_content}\"")
+        target_user = parts[1] if len(parts) > 1 else None
+        
+        if not target_user:
+            print("--- DM Conversations ---")
+            if not dm_history: print("No messages yet.")
+            else: [print(f"- {user}") for user in dm_history]
+        elif target_user in dm_history:
+            name = known_profiles.get(target_user, (target_user,))[0]
+            print(f"--- History with {name} ---")
+            for direction, ts, content in dm_history[target_user]:
+                sender = "You" if direction == 'sent' else name
+                print(f"[{time.ctime(ts)}] {sender}: {content}")
         else:
-            # View history for a specific user
-            target_id = parts[1]
-            if target_id in dm_history:
-                print(f"--- DM History with {target_id} ---")
-                for msg_type, timestamp, content in dm_history[target_id]:
-                    prefix = "You" if msg_type == "sent" else target_id
-                    msg_time = time.strftime("%H:%M:%S", time.localtime(timestamp))
-                    print(f"[{msg_time}] {prefix}: {content}")
-            else:
-                print(f"No DM history with {target_id}.")
+            print(f"No message history with {target_user}.")
 
     elif cmd.startswith("group create "):
-        try:
-            _, _, group_id, group_name, members_str = cmd.split(" ", 4)
+        parts = cmd.split(" ", 4)
+        if len(parts) < 5:
+            print("Usage: group create <group_id> <group_name> <member1,member2,...>")
+        else:
+            group_id = parts[2]
+            group_name = parts[3]
+            members_str = parts[4]
             create_group(group_id, group_name, members_str)
-        except ValueError:
-            print("Usage: group create <id> <name> <members (comma-separated)>")
-            
+    
+    elif cmd.startswith("group add "):
+        parts = cmd.split(" ", 3)
+        if len(parts) != 4:
+            print("Usage: group add <group_id> <member1,member2,...>")
+        else:
+            group_id = parts[2]
+            members_to_add = {m.strip() for m in parts[3].split(',') if m.strip()}
+            send_group_update(group_id, members_to_add=members_to_add)
+
+    elif cmd.startswith("group remove "):
+        parts = cmd.split(" ", 3)
+        if len(parts) != 4:
+            print("Usage: group remove <group_id> <member1,member2,...>")
+        else:
+            group_id = parts[2]
+            members_to_remove = {m.strip() for m in parts[3].split(',') if m.strip()}
+            send_group_update(group_id, members_to_remove=members_to_remove)
+
     elif cmd.startswith("gsend "):
-        try:
-            _, group_id, content = cmd.split(" ", 2)
-            send_group_message(group_id, content)
-        except ValueError:
+        parts = cmd.split(" ", 2)
+        if len(parts) != 3:
             print("Usage: gsend <group_id> <message>")
+        else:
+            group_id = parts[1]
+            content = parts[2]
+            send_group_message(group_id, content)
 
     elif cmd == "groups":
         if not my_groups:
             print("You are not a member of any groups.")
         else:
-            print("--- My Groups ---")
+            print("--- Your Groups ---")
             for group_id, info in my_groups.items():
-                print(f"- '{info['name']}' (ID: {group_id}, Members: {len(info['members'])})")
+                print(f"- {info['name']} (ID: {group_id}) | Members: {len(info['members'])}")
 
-    elif cmd.startswith("ttinvite "):
-        try:
-            _, target_id, symbol = cmd.split(" ", 2)
-            if symbol.upper() not in ("X", "O"):
-                print("Error: Symbol must be 'X' or 'O'.")
-            else:
-                send_invite(target_id, symbol.upper())
-        except ValueError:
-            print("Usage: ttinvite <user_id> <X|O>")
-
-    elif cmd.startswith("ttmove "):
-        try:
-            _, game_id, position = cmd.split(" ", 2)
-            send_move(game_id, position)
-        except ValueError:
-            print("Usage: ttmove <gameid> <position 0-8>")
-
-    elif cmd == "ttgames":
-        if not active_games:
-            print("No active tic-tac-toe games.")
+    elif cmd.startswith("group info "):
+        parts = cmd.split(" ", 2)
+        if len(parts) != 3:
+            print("Usage: group info <group_id>")
         else:
-            print("--- Active Tic-Tac-Toe Games ---")
-            for game_id, game in active_games.items():
-                turn_status = "Your turn" if game.is_my_turn else f"Waiting for {game.opponent_id}"
-                print(f"[{game_id}] vs {game.opponent_id} | Your symbol: {game.my_symbol} | {turn_status}")
+            group_id = parts[2]
+            if group_id in my_groups:
+                info = my_groups[group_id]
+                print(f"--- Members of {info['name']} (ID: {group_id}) ---")
+                for member_id in sorted(list(info['members'])):
+                    # Try to get the friendly name, otherwise just show the ID
+                    name = known_profiles.get(member_id, (member_id,))[0]
+                    if member_id == MY_ID:
+                        print(f"- {name} ({member_id}) [You]")
+                    else:
+                        print(f"- {name} ({member_id})")
+            else:
+                print(f"Error: You are not in a group with ID '{group_id}'.")
+
+    elif cmd == "peers":
+        if not peers:
+            print("No peers known.")
+        else:
+            print("--- Known Peers ---")
+            for uid, (ip, port) in peers.items():
+                name, bio = known_profiles.get(uid, (uid, "N/A"))
+                print(f"- {name} ({uid}) | Bio: {bio}")
+
+    elif cmd == "followers":
+        if not followers:
+            print("You have no followers yet.")
+        else:
+            print("--- Your Followers ---")
+            for f_id in followers:
+                print(f"- {f_id}")
+    
+    # === Tic-Tac-Toe Commands ===
+    elif cmd.startswith("ttinvite "):
+        parts = cmd.split(" ", 2)
+        if len(parts) != 3:
+            print("Usage: ttinvite <user_id> <X|O>")
+        else:
+            target_id = parts[1]
+            symbol = parts[2].upper()
+            if symbol not in ['X', 'O']:
+                print("Error: Symbol must be 'X' or 'O'.")
+            elif target_id not in peers:
+                print(f"Error: {target_id} is not a known peer.")
+            else:
+                send_invite(target_id, symbol)
+                
+    elif cmd.startswith("ttmove "):
+        parts = cmd.split(" ", 2)
+        if len(parts) != 3:
+            print("Usage: ttmove <gameid> <position>")
+        else:
+            game_id = parts[1]
+            position = parts[2]
+            send_move(game_id, position)
     
     elif cmd.startswith("ttaccept "):
-        try:
-            _, game_id, position = cmd.split(" ", 2)
+        parts = cmd.split(" ", 2)
+        if len(parts) != 3:
+            print("Usage: ttaccept <gameid> <position>")
+        else:
+            game_id = parts[1]
+            position = parts[2]
             game = active_games.get(game_id)
             if not game:
-                print(f"Error: Game {game_id} not found or not invited to.")
-                continue
-            if game.is_my_turn:
-                # This command is for accepting an invite where it's our first move.
-                # If it's already our turn, they've already moved.
-                print("Error: It is already your turn to move. Use 'ttmove'.")
-                continue
-            
-            # The 'ttaccept' command is essentially a 'ttmove' for the first move after an invite.
-            send_move(game_id, position)
-        except ValueError:
-            print("Usage: ttaccept <gameid> <position 0-8>")
+                print(f"Error: No pending invite for game {game_id}.")
+            else:
+                # The first move after accepting is handled by the move function
+                # The invite receiver plays 'O' and the inviter plays 'X'
+                if game.my_symbol == 'X':
+                    print("Error: You are 'X', the inviter. You must wait for their move.")
+                else:
+                    send_move(game_id, position)
+    
+    elif cmd == "ttgames":
+        if not active_games:
+            print("No active games.")
+        else:
+            print("--- Active Games ---")
+            for game_id, game in active_games.items():
+                status = "Your turn" if game.is_my_turn else "Waiting for opponent"
+                print(f"- Game {game_id} against {game.opponent_id} ({game.my_symbol}) - {status}")
 
     elif cmd.startswith("fileoffer "):
         # Usage: fileoffer <user_id> <filepath> [description]
@@ -1436,15 +1637,8 @@ while True:
         print("Goodbye!")
         break
     
-    elif cmd == "peers":
-        print("--- Known Peers ---")
-        if not peers:
-            print("No peers discovered yet.")
-        else:
-            for peer_id, addr in peers.items():
-                # Get the name and bio if available
-                name, bio = known_profiles.get(peer_id, (peer_id.split('@')[0], "No bio available"))
-                print(f"- {name} ({peer_id}): {addr[0]}:{addr[1]}")
-                print(f"  Bio: {bio}")
+    elif cmd == "":
+        continue
+
     else:
-        print(f"Unknown command: '{cmd}'. Type 'help' for a list of commands.")
+        print("Unknown command. Type 'help' for list.")
