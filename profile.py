@@ -162,8 +162,8 @@ def set_profile_picture(file_path):
                 MY_AVATAR_DATA = None
                 MY_AVATAR_TYPE = None
                 return
-        
-        print("Profile picture set. Broadcasting new profile...")
+            
+        print(f"Profile picture '{file_path}' set successfully. Broadcasting new profile...")
         broadcast_profile()
     except FileNotFoundError:
         print(f"Error: File not found at {file_path}")
@@ -1282,7 +1282,7 @@ while True:
         print("  peers                                  - List known peers")
         print("  profile set <name|bio> <value>         - Update your profile name or bio")
         print("  profile set avatar <path>              - Add your profile picture from a local file")
-        print("  profile view avatar <user_id>          - View a peer's profile picture")
+        print("  profile view [user_id]                 - View your or another user's profile")
         print("  post <message>                         - Send a post to followers")
         print("  posts                                  - List of posts of the users you are following")
         print("  myposts                                - List your own sent posts")
@@ -1359,13 +1359,42 @@ while True:
             else:
                 print("Invalid field. Can only set 'name' or 'bio'.")
 
-    elif cmd.startswith("profile view avatar "):
-        parts = cmd.split(" ", 3)
-        if len(parts) == 4:
-            user_id = parts[3]
-            view_profile_picture(user_id)
+    elif cmd.startswith("profile view"):
+        parts = cmd.split(" ", 2)
+        if len(parts) == 3:
+            user_id = parts[2]
+            
+            # Check if the user is trying to view their own profile
+            if user_id == MY_ID:
+                print("--- Your Profile ---")
+                print(f"Name: {my_profile_data['name']}")
+                print(f"Bio: {my_profile_data['bio']}")
+                if MY_AVATAR_DATA:
+                    print(f"Profile picture is set. Type: {MY_AVATAR_TYPE}")
+                else:
+                    print("No profile picture is currently set.")
+            elif user_id in known_profiles:
+                name, bio = known_profiles[user_id]
+                print(f"--- Profile for {name} ({user_id}) ---")
+                print(f"Name: {name}")
+                print(f"Bio: {bio}")
+                if user_id in peer_avatars:
+                    print("Profile picture: Yes")
+                else:
+                    print("Profile picture: No")
+            else:
+                print(f"Error: Peer {user_id} not found.")
+        elif len(parts) == 2:
+            # Displays my own profile by default
+            print("--- Your Profile ---")
+            print(f"Name: {my_profile_data['name']}")
+            print(f"Bio: {my_profile_data['bio']}")
+            if MY_AVATAR_DATA:
+                print(f"Profile picture is set. Type: {MY_AVATAR_TYPE}")
+            else:
+                print("No profile picture is currently set.")
         else:
-            print("Usage: profile view avatar <user_id>")
+            print("Usage: profile view [user_id]")
 
     elif cmd.startswith("post "):
         try:
