@@ -33,6 +33,7 @@ If not installed, install Python via Homebrew:
     ```
     brew install python
     ```
+    
 2. Verify pip installation
     ```
     pip3 --version
