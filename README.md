@@ -78,7 +78,7 @@ Open Terminal and run:
 | File Transfer (Offer, Chunk, ACK) | Reviewer | Primary | Reviewer | |
 | Tic Tac Toe Game (with recovery) | Reviewer | Secondary | | Primary |
 | Group Creation / Messaging | Primary | Reviewer | Primary | Secondary |
-| Induced Packet Loss (Game & File) | | | Secondary | Reviewer |
+| Induced Packet Loss (Game & File) | Reviewer | Primary | Secondary | Reviewer |
 | Acknowledgement / Retry | Secondary | Reviewer | | Primary |
 | **UI & Logging** | | | | |
 | Verbose Mode Support | Primary | | Secondary | Reviewer |
@@ -89,7 +89,7 @@ Open Terminal and run:
 | Correct Parsing Validation | Primary | Reviewer | Secondary | |
 | Token Expiry & IP Match | Secondary | | Reviewer | Primary |
 | **Documentation & Coordination** | | | | |
-| RFC & Project Report | | Reviewer | Secondary | Primary |
+| RFC & Project Report | Reviewer | Reviewer | Secondary | Primary |
 | Milestone Tracking & Deliverables | Secondary | | Primary | Reviewer |
 
 ## Authors
