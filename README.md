@@ -1,23 +1,19 @@
-Need more than one devices
+# Local Social Networking Protocol (LSNP)
 
-Syntax:
-python3 profile.py Name
+### Running The Program
 
-Verbose mode:
-python profile.py Name --verbose
+*  Non-verbose mode:
+    ```
+    python3 profile.py Name
+    ```
+*  Verbose mode:
+    ```
+    python profile.py Name --verbose
+    ```
+*  Name will be the names for each of the three terminals
 
-For the game: 
-peers
-ttinvite Bob@127.0.0.1 X
-ttmove g0 POSITION
+### Work Distribution Matrix
 
-- In peers, both should be seen
-- Position if it's from 0-8 
-
-For profile picture:
-Image should be in the same folder as the source code.
-
-Work Distribution Matrix
 | Task / Role | Filipino, Eunice Marble | Filipino, Audric Justin | Lazaro, Heisel Janine | Wee, Justine Erika |
 | :--- | :---: | :---: | :---: | :---: |
 | **Network Communication** | | | | |
@@ -42,3 +38,20 @@ Work Distribution Matrix
 | **Documentation & Coordination** | | | | |
 | RFC & Project Report | | Reviewer | | Secondary |
 | Milestone Tracking & Deliverables | Secondary | | Primary | Reviewer |
+
+## Authors
+* Filipino, Eunice Marble (eunice_filipino@dlsu.edu.ph)
+* Filipino, Audric Justin (audric_filipino@dlsu.edu.ph)
+* Lazaro, Heisel Janine (heisel_lazaro@dlsu.edu.ph)
+* Wee, Justine Erika (justine_wee@dlsu.edu.ph)
+
+## AI Use Declaration
+During the preparation of this work the authors used ChatGPT, CoPilot and Gemini for the following purposes:
+1. Generating portions of the source code 
+2. To refine and improve written content
+3. Provide coding assistance such as debugging errors in code
+4. Understanding the syntax and protocol-related concepts
+5. Providing commands for running the features of the program
+
+After using these tools/services, the authors reviewed and edited the content as needed and take full responsibility for the content of the publication.
+
