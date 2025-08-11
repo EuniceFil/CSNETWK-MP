@@ -81,7 +81,7 @@ Open Terminal and run:
 | Induced Packet Loss (Game & File) | Reviewer | Primary | Reviewer | Secondary |
 | Acknowledgement / Retry | Secondary | Reviewer | Reviewer | Primary |
 | **UI & Logging** | | | | |
-| Verbose Mode Support | Primary | | Secondary | Reviewer |
+| Verbose Mode Support | Primary | Secondary | | Reviewer |
 | Terminal Grid Display | Reviewer | | Secondary | Primary |
 | Message Parsing & Debug Output | Secondary | Primary | Reviewer | Reviewer |
 | **Testing and Validation** | | | | |
