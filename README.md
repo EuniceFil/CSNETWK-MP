@@ -1,7 +1,7 @@
 # Local Social Networking Protocol (LSNP)
 
 ### Running The Program
-#### Windows
+#### Windows Version
 *  Non-verbose mode:
     ```
     python LSNP.py <Name>
@@ -11,7 +11,7 @@
     python LSNP.py <Name> --verbose
     ```
 
-#### MAC
+#### MAC Version
 *  Non-verbose mode:
     ```
     python3 LSNP.py <Name>
