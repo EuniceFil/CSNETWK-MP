@@ -44,6 +44,10 @@ dm_history = {}
 pending_acks = {}
 revoked_tokens = set()
 my_groups = {}
+MY_AVATAR_DATA = None
+MY_AVATAR_TYPE = None
+peer_avatars = {}
+incoming_avatar_chunks = {}
 
 # === File transfer state ===
 # Offers received but not yet accepted: fileid -> metadata
@@ -133,6 +137,90 @@ def validate_token(token, expected_scope, sender_id):
         log("TOKEN !", f"FAIL: Malformed token from {sender_id}")
         return False
 
+# --- Profile Picture Functions ---
+CHUNK_SIZE = 1000  # A safe size for UDP payload
+
+def set_profile_picture(file_path):
+    global MY_AVATAR_DATA, MY_AVATAR_TYPE
+    try:
+        with open(file_path, "rb") as image_file:
+            image_data = image_file.read()
+            
+            # Check if the file exceeds the 20 KB limit
+            if len(image_data) > 20000:
+                print("Error: Image file exceeds the 20 KB limit.")
+                return
+
+            MY_AVATAR_DATA = base64.b64encode(image_data).decode('utf-8')
+            
+            if file_path.lower().endswith(('.png')):
+                MY_AVATAR_TYPE = 'image/png'
+            elif file_path.lower().endswith(('.jpg', '.jpeg')):
+                MY_AVATAR_TYPE = 'image/jpeg'
+            else:
+                print("Error: Unsupported image type. Please use .png or .jpg.")
+                MY_AVATAR_DATA = None
+                MY_AVATAR_TYPE = None
+                return
+        
+        print("Profile picture set. Broadcasting new profile...")
+        broadcast_profile()
+    except FileNotFoundError:
+        print(f"Error: File not found at {file_path}")
+    except Exception as e:
+        print(f"Error setting profile picture: {e}")
+
+def broadcast_profile():
+    # This function now intelligently sends avatars
+    profile_msg = {
+        "type": "PROFILE",
+        "user_id": MY_ID,
+        "name": my_profile_data["name"],
+        "bio": my_profile_data["bio"]
+    }
+    
+    # If the encoded avatar data is small enough to fit in a single packet,
+    # send it all at once.
+    if MY_AVATAR_DATA and len(MY_AVATAR_DATA) <= CHUNK_SIZE:
+        profile_msg["AVATAR_TYPE"] = MY_AVATAR_TYPE
+        profile_msg["AVATAR_ENCODING"] = "base64"
+        profile_msg["AVATAR_DATA"] = MY_AVATAR_DATA
+        send_message(profile_msg, (BROADCAST_ADDR, PORT))
+    
+    # If it's too big, send the profile info first, then send the chunks.
+    elif MY_AVATAR_DATA:
+        send_message(profile_msg, (BROADCAST_ADDR, PORT))
+        send_avatar_in_chunks(MY_AVATAR_DATA, MY_AVATAR_TYPE)
+    
+    # If there's no avatar, just send the regular profile message.
+    else:
+        send_message(profile_msg, (BROADCAST_ADDR, PORT))
+
+
+def send_avatar_in_chunks(avatar_data, avatar_type):
+    """Breaks the base64 encoded avatar into chunks and sends them."""
+    chunks = [avatar_data[i:i + CHUNK_SIZE] for i in range(0, len(avatar_data), CHUNK_SIZE)]
+    total_chunks = len(chunks)
+    transfer_id = str(uuid.uuid4().hex)
+
+    for i, chunk_data in enumerate(chunks):
+        msg = {
+            "type": "PROFILE_CHUNK",
+            "from": MY_ID,
+            "CHUNK_ID": transfer_id,
+            "CHUNK_NUM": str(i + 1),
+            "TOTAL_CHUNKS": str(total_chunks),
+            "AVATAR_TYPE": avatar_type,
+            "AVATAR_CHUNK_DATA": chunk_data
+        }
+        send_message(msg, (BROADCAST_ADDR, PORT))
+
+def view_profile_picture(user_id):
+    if user_id in peer_avatars:
+        print(f"Profile picture found for {user_id}. Data is stored locally.")
+    else:
+        print(f"No profile picture found for {user_id}.")
+
 # === Functions ===
 def log(prefix, message):
     """Prints a message only if VERBOSE mode is enabled."""
@@ -207,15 +295,6 @@ def send_unfollow_request(target_id):
         print(f"Error: Peer {target_id} appears to be offline. Cannot send unfollow request.")
         if message_id in pending_acks:
             del pending_acks[message_id]
-
-def broadcast_profile():
-    profile_msg = {
-        "type": "PROFILE",
-        "user_id": MY_ID,
-        "name": my_profile_data["name"],
-        "bio": my_profile_data["bio"]
-    }
-    send_message(profile_msg, (BROADCAST_ADDR, PORT))
 
 def send_post_to_followers(content):
 
@@ -729,6 +808,7 @@ def handle_message(data, addr):
         # These are critical requests, so we ACK them.
         ack_msg = {"type": "ACK", "message_id": message_id, "status": "RECEIVED"}
         send_message(ack_msg, addr)
+        print("> ", end="", flush=True)
 
     if mtype == "FOLLOW":
         from_id = data.get("from")
@@ -739,6 +819,7 @@ def handle_message(data, addr):
             print(f"\n[FOLLOW] {from_id} is now following you.")
             ack_msg = {"type": "ACK", "message_id": message_id, "status": "RECEIVED"}
             send_message(ack_msg, (addr[0], PORT))
+            print("> ", end="", flush=True)
 
     elif mtype == "UNFOLLOW":
         from_id = data.get("from")
@@ -748,6 +829,7 @@ def handle_message(data, addr):
             print(f"\n[UNFOLLOW] {from_id} has unfollowed you.")
             ack_msg = {"type": "ACK", "message_id": message_id, "status": "RECEIVED"}
             send_message(ack_msg, (addr[0], PORT))
+            print("> ", end="", flush=True)
 
     elif mtype == "ACK":
         if message_id in pending_acks:
@@ -763,6 +845,7 @@ def handle_message(data, addr):
                 print(f"\n[SUCCESS] Your unfollow request for {target_id} was received.")
             
             del pending_acks[message_id]
+            print("> ", end="", flush=True)
 
     elif mtype == "DM":
         to_id = data.get("to")
@@ -781,6 +864,7 @@ def handle_message(data, addr):
             if message_id:
                 ack_msg = {"type": "ACK", "message_id": message_id, "status": "RECEIVED"}
                 send_message(ack_msg, addr)
+            print("> ", end="", flush=True)
 
     elif mtype == "PROFILE":
         name = data.get("name", "")
@@ -789,6 +873,48 @@ def handle_message(data, addr):
             known_profiles[sender_id] = (name, bio)
             peers[sender_id] = (addr[0], PORT)
             print(f"\n[PROFILE] {sender_id}: {name} | {bio}")
+
+            if 'avatar_data' in data and 'avatar_type' in data:
+                peer_avatars[sender_id] = {
+                    "data": data['avatar_data'],
+                    "type": data['avatar_type']
+                }
+                print(f"[PROFILE] Avatar received for {sender_id}.")
+            print("> ", end="", flush=True)
+
+    elif mtype == "PROFILE_CHUNK":
+        sender_id = data.get("from")
+        chunk_id = data.get("chunk_id")
+        chunk_num = int(data.get("chunk_num", 0))
+        total_chunks = int(data.get("total_chunks", 0))
+        avatar_type = data.get("avatar_type")
+        chunk_data = data.get("avatar_chunk_data")
+        
+        if sender_id not in incoming_avatar_chunks:
+            incoming_avatar_chunks[sender_id] = {}
+        if chunk_id not in incoming_avatar_chunks[sender_id]:
+            incoming_avatar_chunks[sender_id][chunk_id] = {
+                "chunks": [None] * total_chunks,
+                "received": 0,
+                "total": total_chunks,
+                "type": avatar_type
+            }
+
+        if chunk_num > 0 and chunk_num <= total_chunks:
+            incoming_avatar_chunks[sender_id][chunk_id]["chunks"][chunk_num - 1] = chunk_data
+            incoming_avatar_chunks[sender_id][chunk_id]["received"] += 1
+
+            if incoming_avatar_chunks[sender_id][chunk_id]["received"] == total_chunks:
+                full_avatar_data = "".join(incoming_avatar_chunks[sender_id][chunk_id]["chunks"])
+                
+                peer_avatars[sender_id] = {
+                    "data": full_avatar_data,
+                    "type": avatar_type
+                }
+                
+                print(f"\n[PROFILE] Full avatar received for {sender_id}.")
+                del incoming_avatar_chunks[sender_id][chunk_id]
+                print("> ", end="", flush=True)
         
     elif mtype == "POST":
         content = data.get("content", "")
@@ -803,6 +929,7 @@ def handle_message(data, addr):
             })
             name = known_profiles.get(sender_id, [sender_id])[0]
             print(f"\n[POST from {name}]: {content}")
+            print("> ", end="", flush=True)
     
     elif mtype == "LIKE":
         liker_id = data.get("from")
@@ -823,6 +950,7 @@ def handle_message(data, addr):
             liker_name = known_profiles.get(sender_id, (sender_id,))[0]
             action_verb = "likes" if action == "LIKE" else "unlikes"
             print(f"\n[ACTION] {liker_name} {action_verb} {original_post_content}")
+            print("> ", end="", flush=True)
 
     elif mtype == "GROUP_CREATE":
         group_id = data.get("group_id")
@@ -837,6 +965,7 @@ def handle_message(data, addr):
             # Print non-verbose message only if we are not the creator
             if sender_id != MY_ID:
                 print(f"\nYou've been added to {group_name}")
+                print("> ", end="", flush=True)
 
     elif mtype == "GROUP_MESSAGE":
         group_id = data.get("group_id")
@@ -852,6 +981,7 @@ def handle_message(data, addr):
                 print(f"\n[GROUP: {group_name}] {sender_name}: {content}")
             else:
                 log("DROP !", f"Group message from {sender_id} for group {group_id}, but they are not a member.")
+            print("> ", end="", flush=True)
 
     elif mtype == "GROUP_UPDATE":
         group_id = data.get("group_id")
@@ -886,6 +1016,7 @@ def handle_message(data, addr):
                 del my_groups[group_id]
             elif sender_id != MY_ID:
                 print(f"\nThe group “{group_name}” member list was updated.")
+            print("> ", end="", flush=True)
                 
     # === File transfer handlers ===
     elif mtype == "FILE_OFFER":
@@ -919,6 +1050,7 @@ def handle_message(data, addr):
         # Non-verbose printing (per spec)
         sender_name = known_profiles.get(from_id, (from_id.split('@')[0],))[0]
         print(f"\nUser {sender_name} is sending you a file do you accept? (fileid: {fileid})")
+        print("> ", end="", flush=True)
 
     elif mtype == "FILE_CHUNK":
         # Received chunk — store it only if offer accepted (incoming_transfers contains fileid)
@@ -959,6 +1091,7 @@ def handle_message(data, addr):
 
         # Check if we can assemble
         try_assemble_file(fileid)
+        print("> ", end="", flush=True)
 
     elif mtype == "FILE_RECEIVED":
         # Sender receives notification; we can log it
@@ -1007,6 +1140,7 @@ def handle_message(data, addr):
             opponent_symbol=symbol,
             is_my_turn=(my_symbol == "X")
         )
+        print("> ", end="", flush=True)
         
     elif mtype == "TICTACTOE_MOVE":
         from_id = data.get("from")
@@ -1061,6 +1195,7 @@ def handle_message(data, addr):
         if winner:
             send_result(game_id, winner, winning_line)
             del active_games[game_id]
+        print("> ", end="", flush=True)
         
     elif mtype == "TICTACTOE_RESULT":
         game_id = data.get("gameid")
@@ -1089,9 +1224,7 @@ def handle_message(data, addr):
             print(f"\nGame over. Result: {result}")
 
         del active_games[game_id]
-
-    # Reprint the prompt cleanly after handling a message
-    print(f"> ", end="", flush=True)
+        print("> ", end="", flush=True)
 
 # === Listener Thread ===
 def listen():
@@ -1148,6 +1281,8 @@ while True:
         print("Available commands:")
         print("  peers                                  - List known peers")
         print("  profile set <name|bio> <value>         - Update your profile name or bio")
+        print("  profile set avatar <path>              - Add your profile picture from a local file")
+        print("  profile view avatar <user_id>          - View a peer's profile picture")
         print("  post <message>                         - Send a post to followers")
         print("  posts                                  - List of posts of the users you are following")
         print("  myposts                                - List your own sent posts")
@@ -1196,6 +1331,14 @@ while True:
             for f_id in following:
                 print(f"- {f_id}")
 
+    elif cmd.startswith("profile set avatar "):
+        parts = cmd.split(" ", 3)
+        if len(parts) == 4:
+            file_path = parts[3]
+            set_profile_picture(file_path)
+        else:
+            print("Usage: profile set avatar <path_to_image>")
+
     elif cmd.startswith("profile set "):
     # We split by space into exactly 4 parts for a valid command
         parts = cmd.split(" ", 3)
@@ -1215,6 +1358,14 @@ while True:
                 broadcast_profile() # Immediately announce the change
             else:
                 print("Invalid field. Can only set 'name' or 'bio'.")
+
+    elif cmd.startswith("profile view avatar "):
+        parts = cmd.split(" ", 3)
+        if len(parts) == 4:
+            user_id = parts[3]
+            view_profile_picture(user_id)
+        else:
+            print("Usage: profile view avatar <user_id>")
 
     elif cmd.startswith("post "):
         try:
