@@ -1,3 +1,10 @@
+# S20
+# Members:
+# Audric Justin Filipino
+# Eunice Marble Filipino
+# Heisel Janine Lazaro
+# Justine Erika Wee
+
 import socket
 import threading
 import time
