@@ -162,8 +162,8 @@ def set_profile_picture(file_path):
                 MY_AVATAR_DATA = None
                 MY_AVATAR_TYPE = None
                 return
-        
-        print("Profile picture set. Broadcasting new profile...")
+            
+        print(f"Profile picture '{file_path}' set successfully. Broadcasting new profile...")
         broadcast_profile()
     except FileNotFoundError:
         print(f"Error: File not found at {file_path}")
@@ -616,25 +616,6 @@ def fileaccept_cmd(fileid):
     if not offer:
         print(f"Error: No pending file offer with id {fileid}. Use 'fileoffers' to list offers.")
         return
-        
-    # --- This is the new logic to send an acceptance message ---
-    sender_id = offer["from"]
-    if sender_id not in peers:
-        print(f"Error: Peer {sender_id} is no longer known. Cannot accept offer.")
-        return
-
-    # Create the FILE_ACCEPT message to send back to the original sender
-    msg = {
-        "type": "FILE_ACCEPT",
-        "from": MY_ID,
-        "to": sender_id,
-        "fileid": fileid,
-        "timestamp": str(int(time.time())),
-        "token": generate_token(MY_ID, scope="file")
-    }
-    send_message(msg, peers[sender_id])
-    # -----------------------------------------------------------
-
     # Mark that we accept this file — create incoming_transfers entry
     incoming_transfers[fileid] = {
         "filename": offer["filename"],
@@ -644,11 +625,9 @@ def fileaccept_cmd(fileid):
         "total_chunks": None,  # to be set when the first chunk arrives
         "chunks": {}
     }
-    
     # Remove from pending offers
     del pending_file_offers[fileid]
-    
-    print(f"[FILE] Accepted offer {fileid}. Notified sender to begin transfer.")
+    print(f"[FILE] Accepted offer {fileid}. Waiting for chunks...")
 
 def send_file_received(target_id, fileid, status="COMPLETE"):
     msg = {
@@ -675,16 +654,14 @@ def try_assemble_file(fileid):
         return
 
     # Reassemble chunks in order
-    ordered_chunks = []
+    ordered = []
     for i in range(total):
-        # We need to get the raw bytes, not the base64 string
-        ordered_chunks.append(chunks[str(i)])
-
+        ordered.append(chunks[str(i)])
     try:
-        # Join the raw byte chunks together
-        raw = b"".join(ordered_chunks)
+        raw_b64 = "".join(ordered)
+        raw = base64.b64decode(raw_b64)
     except Exception as e:
-        log("DROP !", f"Failed to reassemble file {fileid}: {e}")
+        log("DROP !", f"Failed to decode/reassemble file {fileid}: {e}")
         return
 
     filename = info["filename"]
@@ -1043,71 +1020,91 @@ def handle_message(data, addr):
                 
     # === File transfer handlers ===
     elif mtype == "FILE_OFFER":
+        # Received an offer; store it in pending_file_offers and prompt user per spec
         from_id = data.get("from")
+        to_id = data.get("to")
         fileid = data.get("fileid")
-        # Check if the offer is for me
-        if data.get("to") == MY_ID:
-            # Store the offer
-            pending_file_offers[fileid] = data
-            print(f"\n[FILE_OFFER from {from_id}] '{data['filename']}' ({data['filesize']} bytes, ID: {fileid})")
-            if data.get("description"):
-                print(f"  Description: {data['description']}")
-            print("To accept, use 'fileaccept <fileid>'.")
-            print("> ", end="", flush=True)
+        filename = data.get("filename")
+        filesize = data.get("filesize")
+        filetype = data.get("filetype")
+        description = data.get("description", "")
 
-    elif mtype == "FILE_ACCEPT":
-        from_id = data.get("from")
-        fileid = data.get("fileid")
-        
-        # Check if this is an acceptance for one of our outgoing offers
-        if fileid in outgoing_transfers and outgoing_transfers[fileid]["target"] == from_id:
-            print(f"\n[FILE_ACCEPT] Peer {from_id} accepted offer for file {fileid}. Beginning transfer...")
-            
-            # Start a new thread to send the chunks
-            threading.Thread(target=_send_file_chunks_async, args=(fileid,)).start()
-            print("> ", end="", flush=True)
+        # Ensure offer is intended for us
+        if to_id != MY_ID:
+            return
+
+        # Validate token scope before advertising offer to user (optional but sensible)
+        if not validate_token(token, "file", from_id):
+            log("DROP !", f"FILE_OFFER from {from_id} failed token validation.")
+            return
+
+        pending_file_offers[fileid] = {
+            "from": from_id,
+            "filename": filename,
+            "filesize": filesize,
+            "filetype": filetype,
+            "description": description,
+            "timestamp": data.get("timestamp", "")
+        }
+
+        # Non-verbose printing (per spec)
+        sender_name = known_profiles.get(from_id, (from_id.split('@')[0],))[0]
+        print(f"\nUser {sender_name} is sending you a file do you accept? (fileid: {fileid})")
+        print("> ", end="", flush=True)
 
     elif mtype == "FILE_CHUNK":
+        # Received chunk — store it only if offer accepted (incoming_transfers contains fileid)
         from_id = data.get("from")
+        to_id = data.get("to")
         fileid = data.get("fileid")
-        chunk_index = int(data.get("chunk_index"))
-        total_chunks = int(data.get("total_chunks"))
-        chunk_data = data.get("data")
-        
-        # Check if we are expecting this file
-        if fileid in incoming_transfers:
-            info = incoming_transfers[fileid]
-            # First chunk? Store total count
-            if info["total_chunks"] is None:
-                info["total_chunks"] = total_chunks
-                print(f"\n[FILE] Starting transfer for {info['filename']}. Expecting {total_chunks} chunks.")
-            
-            # Store the chunk data
-            info["chunks"][str(chunk_index)] = base64.b64decode(chunk_data.encode('ascii'))
-            
-            # Check if all chunks are received
-            if len(info["chunks"]) == info["total_chunks"]:
-                print(f"\n[FILE] All chunks for {info['filename']} received. Reassembling...")
-                try_assemble_file(fileid)
-            print("> ", end="", flush=True)
-            
-    elif mtype == "FILE_RECEIVED":
-        from_id = data.get("from")
-        fileid = data.get("fileid")
-        status = data.get("status")
+        chunk_index = data.get("chunk_index")
+        total_chunks = data.get("total_chunks")
+        chunk_size = data.get("chunk_size")
+        b64data = data.get("data")
+        token = data.get("token", "")
 
-        # Check if this is a receipt for a file we sent
-        if fileid in outgoing_transfers and outgoing_transfers[fileid]["target"] == from_id:
-            filename = outgoing_transfers[fileid]["filename"]
-            if status == "COMPLETE":
-                print(f"\n[FILE_RECEIVED] Peer {from_id} successfully received '{filename}'.")
-                
-                # Cleanup the outgoing transfer record
+        # Only accept chunks if they are for us
+        if to_id != MY_ID:
+            return
+
+        # Token validation (must be file scope)
+        if not validate_token(token, "file", from_id):
+            log("DROP !", f"FILE_CHUNK from {from_id} failed token validation.")
+            return
+
+        # If this fileid is not in incoming_transfers (i.e., not accepted), ignore chunks
+        transfer = incoming_transfers.get(fileid)
+        if not transfer:
+            log("DROP !", f"Ignoring chunk for {fileid} because offer not accepted or unknown.")
+            return
+
+        # Initialize total_chunks if not set
+        if transfer["total_chunks"] is None and total_chunks:
+            try:
+                transfer["total_chunks"] = int(total_chunks)
+            except ValueError:
+                transfer["total_chunks"] = None
+
+        # Store the chunk (keep as base64 string for easier concatenation/assembly)
+        transfer["chunks"][chunk_index] = b64data
+        log("RECV <", f"Stored chunk {chunk_index} for {fileid} (from {from_id})")
+
+        # Check if we can assemble
+        try_assemble_file(fileid)
+        print("> ", end="", flush=True)
+
+    elif mtype == "FILE_RECEIVED":
+        # Sender receives notification; we can log it
+        from_id = data.get("from")
+        to_id = data.get("to")
+        fileid = data.get("fileid")
+        status = data.get("status", "")
+        if to_id == MY_ID:
+            log("RECV <", f"FILE_RECEIVED from {from_id} for {fileid}: {status}")
+            # Optionally cleanup outgoing_transfers
+            if fileid in outgoing_transfers:
                 del outgoing_transfers[fileid]
-            else:
-                print(f"\n[FILE_RECEIVED] Peer {from_id} reported an issue with '{filename}' (Status: {status}).")
-            print("> ", end="", flush=True)
-            
+
     # === Tic-Tac-Toe Message Handlers ===
     elif mtype == "TICTACTOE_INVITE":
         game_id = data.get("gameid")
@@ -1284,8 +1281,8 @@ while True:
         print("Available commands:")
         print("  peers                                  - List known peers")
         print("  profile set <name|bio> <value>         - Update your profile name or bio")
-        print("  profile set avatar <file_name>         - Add your profile picture from a local file")
-        print("  profile view avatar <user_id>          - View a peer's profile picture")
+        print("  profile set avatar <path>              - Add your profile picture from a local file")
+        print("  profile view [user_id]                 - View your or another user's profile")
         print("  post <message>                         - Send a post to followers")
         print("  posts                                  - List of posts of the users you are following")
         print("  myposts                                - List your own sent posts")
@@ -1362,13 +1359,42 @@ while True:
             else:
                 print("Invalid field. Can only set 'name' or 'bio'.")
 
-    elif cmd.startswith("profile view avatar "):
-        parts = cmd.split(" ", 3)
-        if len(parts) == 4:
-            user_id = parts[3]
-            view_profile_picture(user_id)
+    elif cmd.startswith("profile view"):
+        parts = cmd.split(" ", 2)
+        if len(parts) == 3:
+            user_id = parts[2]
+            
+            # Check if the user is trying to view their own profile
+            if user_id == MY_ID:
+                print("--- Your Profile ---")
+                print(f"Name: {my_profile_data['name']}")
+                print(f"Bio: {my_profile_data['bio']}")
+                if MY_AVATAR_DATA:
+                    print(f"Profile picture is set. Type: {MY_AVATAR_TYPE}")
+                else:
+                    print("No profile picture is currently set.")
+            elif user_id in known_profiles:
+                name, bio = known_profiles[user_id]
+                print(f"--- Profile for {name} ({user_id}) ---")
+                print(f"Name: {name}")
+                print(f"Bio: {bio}")
+                if user_id in peer_avatars:
+                    print("Profile picture: Yes")
+                else:
+                    print("Profile picture: No")
+            else:
+                print(f"Error: Peer {user_id} not found.")
+        elif len(parts) == 2:
+            # Displays my own profile by default
+            print("--- Your Profile ---")
+            print(f"Name: {my_profile_data['name']}")
+            print(f"Bio: {my_profile_data['bio']}")
+            if MY_AVATAR_DATA:
+                print(f"Profile picture is set. Type: {MY_AVATAR_TYPE}")
+            else:
+                print("No profile picture is currently set.")
         else:
-            print("Usage: profile view avatar <user_id>")
+            print("Usage: profile view [user_id]")
 
     elif cmd.startswith("post "):
         try:
